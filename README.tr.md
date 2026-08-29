@@ -12,11 +12,11 @@ başlatmaz.
 
 ## En basit kullanım
 
-`zimigrate` paketini hem eski hem yeni Zimbra sunucusuna kurun. Depo kökündeki
-`export.sh` ve `import.sh` işletim sistemini algılar, yalnızca eksikse Python 3.11+
-paketlerini kurar, mevcut `.venv` ortamını yeniden kullanır ve komutu başlatır.
-`export_data` bulunduğunuz dizinde oluşur; yeterli boş alan olan bir volume'e geçip
-şunu çalıştırın:
+`zimigrate` paketini hem eski hem yeni Zimbra sunucusuna kurun. Depoyu `vendor/`
+diziniyle birlikte kopyalayın. `export.sh` ve `import.sh` önce bu dizindeki sabit
+CPython 3.12 çalışma zamanını, pip wheel'lerini ve CA paketini kullanır; OS Python
+paketleri veya GitHub indirmesi yalnızca `vendor/` yoksa devreye girer. `export_data`
+bulunduğunuz dizinde oluşur; yeterli boş alan olan bir volume'e geçip şunu çalıştırın:
 
 ```bash
 /path/to/zimigratex/export.sh
@@ -196,6 +196,24 @@ zaten hazırsa betikler OS paket kurulumu ve env oluşturmayı atlar. Kaynak kod
 runtime damgası geçersizleşir ve eski `.venv` içindeki kodun sessizce çalışması yerine
 paket yeniden kurulur. Ek argümanlar iletilir; örneğin
 `./export.sh --archive /srv/migration/export_data`.
+
+Depoyu `vendor/` ile birlikte kopyalayın. Sarmalayıcılar `vendor/python/` içindeki
+eşleşen CPython arşivini açar, `cryptography` ve `rich` paketlerini `vendor/wheels/`
+üzerinden PyPI'ye bağlanmadan kurar ve hâlâ indirme gerekirse
+`vendor/certs/cacert.pem` kullanır. Bu dosyaları interneti olan bir makinede yenilemek
+için:
+
+```bash
+./scripts/vendor-runtime.sh
+```
+
+`vendor/` yoksa ve OS Python 3.11+ kurulamazsa sarmalayıcılar aynı sabitlenmiş
+bağımsız CPython 3.12 çalışma zamanını indirir, SHA-256 özetini doğrular ve devam eder.
+`python3-venv` gibi isteğe bağlı paketlerin yokluğu `ca-certificates` kurulumunu
+engellemez. TLS güven deposu GitHub'ı doğrulayamazsa indirme CA paketinden sonra ve
+son çare olarak TLS doğrulaması olmadan yinelenir; sabit SHA-256 özeti değiştirilmiş
+bir arşivi yine reddeder. Sanal ortam hâlâ oluşturulamazsa `cryptography` ve `rich`
+`.runtime/` altına kurulur ve `zimigrate` depo `src/` ağacından çalışır.
 
 Elle kurulum da kullanılabilir:
 

@@ -10,11 +10,11 @@ another server with SSH and never starts an import after export.
 
 ## Simple workflow
 
-Install `zimigrate` on both Zimbra servers. The repository root contains `export.sh`
-and `import.sh`; these detect the OS, install missing Python 3.11+ packages only when
-needed, reuse an existing `.venv`, and then start the migration command. `export_data`
-is created in the current working directory, so change to a volume with enough free
-space and run:
+Install `zimigrate` on both Zimbra servers. Copy the whole repository, including the
+`vendor/` directory. `export.sh` and `import.sh` use that directory first: a pinned
+CPython 3.12 runtime, pip wheels, and a CA bundle. They install OS Python packages or
+download from GitHub only when `vendor/` is missing. `export_data` is created in the
+current working directory, so change to a volume with enough free space and run:
 
 ```bash
 /path/to/zimigratex/export.sh
@@ -165,8 +165,21 @@ invalidate the runtime stamp and trigger a package reinstall, preventing an old 
 from silently running stale migration code. Extra arguments are passed through, for
 example `./export.sh --archive /srv/migration/export_data`.
 
-If the OS Python packages cannot be found or installed, the wrappers download a pinned
-standalone CPython 3.12 runtime, verify its SHA-256 digest, and continue. If a
+Copy `vendor/` with the repository. The wrappers extract the matching standalone
+CPython archive from `vendor/python/`, install `cryptography` and `rich` from
+`vendor/wheels/` without contacting PyPI, and use `vendor/certs/cacert.pem` when a
+download is still required. Refresh those files on a machine with internet access:
+
+```bash
+./scripts/vendor-runtime.sh
+```
+
+If `vendor/` is absent and OS Python 3.11+ cannot be installed, the wrappers download
+the same pinned CPython 3.12 runtime, verify its SHA-256 digest, and continue. Missing
+optional packages such as `python3-venv` no longer block `ca-certificates`. If the
+mail host's TLS trust store cannot verify GitHub, the download retries after installing
+CA certificates and, as a last resort, without TLS verification; the pinned SHA-256
+digest still rejects a substituted archive. If a
 virtualenv still cannot be created, they run `zimigrate` from the repository `src/`
 tree after installing `cryptography` and `rich` next to `.runtime/`.
 

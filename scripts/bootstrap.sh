@@ -133,12 +133,23 @@ install_apt_packages() {
     local package
     log "Installing OS packages with apt ($OS_ID)"
     run_root env DEBIAN_FRONTEND=noninteractive apt-get update -qq || return 1
-    run_root env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-        python3 python3-venv python3-pip ca-certificates || return 1
-    for package in python3.12 python3.12-venv python3.11 python3.11-venv; do
-        run_root env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-            "$package" >/dev/null 2>&1 || true
+    # Install each package separately. A missing optional package such as
+    # python3-venv must not roll back ca-certificates, which the standalone
+    # Python download needs for TLS.
+    _apt_install_one ca-certificates || true
+    run_root update-ca-certificates >/dev/null 2>&1 || true
+    for package in python3 python3-pip python3-venv; do
+        _apt_install_one "$package" || true
     done
+    for package in python3.12 python3.12-venv python3.11 python3.11-venv \
+        python3.12-pip python3.11-pip; do
+        _apt_install_one "$package" >/dev/null 2>&1 || true
+    done
+    return 0
+}
+
+_apt_install_one() {
+    run_root env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "$1"
 }
 
 install_dnf_packages() {
@@ -303,21 +314,135 @@ PY
     fi
 }
 
+install_ca_certificates() {
+    detect_os
+    case $OS_ID in
+        ubuntu | debian | linuxmint | pop)
+            _apt_install_one ca-certificates || return 1
+            run_root update-ca-certificates >/dev/null 2>&1 || true
+            ;;
+        rhel | centos | rocky | almalinux | ol | fedora | amzn)
+            if command -v dnf >/dev/null 2>&1; then
+                run_root dnf install -y ca-certificates || return 1
+            else
+                run_root yum install -y ca-certificates || return 1
+            fi
+            run_root update-ca-trust extract >/dev/null 2>&1 || true
+            ;;
+        sles | opensuse-leap | opensuse-tumbleweed | opensuse)
+            run_root zypper --non-interactive install -y ca-certificates || return 1
+            ;;
+        arch | manjaro)
+            run_root pacman -Sy --noconfirm ca-certificates || return 1
+            ;;
+        alpine)
+            run_root apk add --no-cache ca-certificates || return 1
+            run_root update-ca-certificates >/dev/null 2>&1 || true
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+system_ca_file() {
+    local candidate
+    if [[ -n ${ROOT-} && -s $ROOT/vendor/certs/cacert.pem ]]; then
+        printf '%s\n' "$ROOT/vendor/certs/cacert.pem"
+        return 0
+    fi
+    for candidate in \
+        /etc/ssl/certs/ca-certificates.crt \
+        /etc/pki/tls/certs/ca-bundle.crt \
+        /etc/ssl/cert.pem; do
+        if [[ -s $candidate ]]; then
+            printf '%s\n' "$candidate"
+            return 0
+        fi
+    done
+    return 1
+}
+
+download_with_curl() {
+    local url=$1 destination=$2 insecure=$3
+    local -a args
+    local ca_file
+    args=(-fL --connect-timeout 15 --retry 3 --retry-delay 2 --max-time 300)
+    if [[ $insecure == 1 ]]; then
+        args+=(-k)
+    elif ca_file=$(system_ca_file); then
+        args+=(--cacert "$ca_file")
+    fi
+    args+=(-o "$destination" "$url")
+    curl "${args[@]}"
+}
+
+download_with_wget() {
+    local url=$1 destination=$2 insecure=$3
+    local -a args
+    args=(--timeout=15 --tries=3 -O "$destination")
+    if [[ $insecure == 1 ]]; then
+        args+=(--no-check-certificate)
+    fi
+    wget "${args[@]}" "$url"
+}
+
+try_download() {
+    local url=$1 destination=$2 insecure=$3
+    if command -v curl >/dev/null 2>&1; then
+        download_with_curl "$url" "$destination" "$insecure" && return 0
+    fi
+    if command -v wget >/dev/null 2>&1; then
+        download_with_wget "$url" "$destination" "$insecure" && return 0
+    fi
+    return 1
+}
+
 download_url() {
     local url=$1 destination=$2
-    if command -v curl >/dev/null 2>&1; then
-        curl -fL --connect-timeout 15 --retry 3 --retry-delay 2 --max-time 300 \
-            -o "$destination" "$url"
-    elif command -v wget >/dev/null 2>&1; then
-        wget -q --timeout=15 --tries=3 -O "$destination" "$url"
-    else
+    if ! command -v curl >/dev/null 2>&1 && ! command -v wget >/dev/null 2>&1; then
         log "curl or wget is required to download a standalone Python runtime"
         return 1
     fi
+    if try_download "$url" "$destination" 0; then
+        return 0
+    fi
+    log "HTTPS download failed; installing CA certificates and retrying"
+    install_ca_certificates || true
+    if try_download "$url" "$destination" 0; then
+        return 0
+    fi
+    log "TLS certificate verification failed; retrying without it because the archive SHA-256 is pinned"
+    try_download "$url" "$destination" 1
+}
+
+vendored_python_archive() {
+    printf '%s\n' "$ROOT/vendor/python/$(standalone_archive_name "$1")"
+}
+
+has_vendor_wheels() {
+    local match
+    shopt -s nullglob
+    match=("$ROOT"/vendor/wheels/*.whl)
+    shopt -u nullglob
+    ((${#match[@]} > 0))
+}
+
+pip_install() {
+    local python=$1
+    shift
+    local -a cmd=("$python" -m pip install -q --disable-pip-version-check)
+    if has_vendor_wheels; then
+        if "${cmd[@]}" --no-index --no-build-isolation --find-links "$ROOT/vendor/wheels" "$@"; then
+            return 0
+        fi
+        log "Vendored wheels were incomplete; trying the network"
+    fi
+    "${cmd[@]}" "$@"
 }
 
 ensure_standalone_python() {
-    local target archive_name archive digest tag_file
+    local target archive_name archive digest tag_file vendor_archive from_vendor=0
     runtime_paths
     tag_file=$RUNTIME_DIR/python.tag
     if ! target=$(standalone_target); then
@@ -333,24 +458,38 @@ ensure_standalone_python() {
         [[ -f $tag_file && $(cat "$tag_file") == "$archive_name" ]]; then
         return 0
     fi
-    log "Downloading standalone Python $STANDALONE_PYTHON_VERSION ($target)"
     mkdir -p "$RUNTIME_DIR"
-    archive=$(mktemp "$RUNTIME_DIR/python.XXXXXX.tar.gz")
-    if ! download_url "$STANDALONE_BASE_URL/$archive_name" "$archive"; then
-        rm -f "$archive"
-        return 1
+    vendor_archive=$(vendored_python_archive "$target")
+    if [[ -f $vendor_archive ]]; then
+        log "Using vendored standalone Python $archive_name"
+        archive=$vendor_archive
+        from_vendor=1
+    else
+        log "Downloading standalone Python $STANDALONE_PYTHON_VERSION ($target)"
+        install_ca_certificates >/dev/null 2>&1 || true
+        archive=$(mktemp "$RUNTIME_DIR/python.XXXXXX.tar.gz")
+        if ! download_url "$STANDALONE_BASE_URL/$archive_name" "$archive"; then
+            rm -f "$archive"
+            return 1
+        fi
     fi
     if ! verify_sha256 "$archive" "$digest"; then
-        rm -f "$archive"
+        if [[ $from_vendor -eq 0 ]]; then
+            rm -f "$archive"
+        fi
         log "Standalone Python archive checksum mismatch"
         return 1
     fi
     rm -rf "$RUNTIME_DIR/python"
     if ! tar -xzf "$archive" -C "$RUNTIME_DIR"; then
-        rm -f "$archive"
+        if [[ $from_vendor -eq 0 ]]; then
+            rm -f "$archive"
+        fi
         return 1
     fi
-    rm -f "$archive"
+    if [[ $from_vendor -eq 0 ]]; then
+        rm -f "$archive"
+    fi
     if [[ ! -x $STANDALONE_PYTHON ]] || ! python_is_usable "$STANDALONE_PYTHON"; then
         log "Standalone Python extracted but is not usable"
         return 1
@@ -359,7 +498,7 @@ ensure_standalone_python() {
 }
 
 ensure_python() {
-    local selected
+    local selected target
     runtime_paths
     if selected=$(find_system_python) && python_has_venv "$selected"; then
         SYSTEM_PYTHON=$selected
@@ -369,6 +508,13 @@ ensure_python() {
         log "Python is present but the venv module is missing"
     else
         log "Python 3.11+ was not found"
+    fi
+    if target=$(standalone_target) && [[ -f $(vendored_python_archive "$target") ]]; then
+        log "Using the vendored standalone Python runtime"
+        if ensure_standalone_python; then
+            SYSTEM_PYTHON=$STANDALONE_PYTHON
+            return 0
+        fi
     fi
     if install_os_packages; then
         if selected=$(find_system_python) && python_has_venv "$selected"; then
@@ -408,11 +554,15 @@ try_venv_install() {
         fi
         "$SYSTEM_PYTHON" -m venv "$ROOT/.venv" || return 1
     fi
-    "$ROOT/.venv/bin/python" -m pip install -q --upgrade pip || return 1
+    if has_vendor_wheels; then
+        pip_install "$ROOT/.venv/bin/python" pip setuptools wheel || true
+    else
+        "$ROOT/.venv/bin/python" -m pip install -q --upgrade pip || return 1
+    fi
     log "Installing zimigrate into $ROOT/.venv"
-    if ! "$ROOT/.venv/bin/python" -m pip install -q "$ROOT"; then
+    if ! pip_install "$ROOT/.venv/bin/python" "$ROOT"; then
         install_build_packages || true
-        "$ROOT/.venv/bin/python" -m pip install -q "$ROOT" || return 1
+        pip_install "$ROOT/.venv/bin/python" "$ROOT" || return 1
     fi
     touch "$ROOT/.venv/.zimigrate-source-stamp"
     zimigrate_is_ready
@@ -422,10 +572,13 @@ install_source_dependencies() {
     local python=$1
     runtime_paths
     mkdir -p "$SITE_PACKAGES"
-    "$python" -m ensurepip --upgrade >/dev/null 2>&1 || true
-    "$python" -m pip install -q --upgrade pip >/dev/null 2>&1 || true
-    PIP_DISABLE_PIP_VERSION_CHECK=1 "$python" -m pip install -q --target "$SITE_PACKAGES" \
-        "cryptography>=42" "rich>=13.9,<16"
+    if has_vendor_wheels; then
+        "$python" -m ensurepip >/dev/null 2>&1 || true
+    else
+        "$python" -m ensurepip --upgrade >/dev/null 2>&1 || true
+        "$python" -m pip install -q --upgrade pip >/dev/null 2>&1 || true
+    fi
+    pip_install "$python" --target "$SITE_PACKAGES" "cryptography>=42" "rich>=13.9,<16"
 }
 
 try_source_runtime_install() {

@@ -11,6 +11,7 @@ SCRIPTS = (
     ROOT / "export.sh",
     ROOT / "import.sh",
     ROOT / "scripts" / "bootstrap.sh",
+    ROOT / "scripts" / "vendor-runtime.sh",
 )
 
 
@@ -96,6 +97,7 @@ ROOT="$1"
 . "$ROOT/scripts/bootstrap.sh"
 find_system_python() { return 1; }
 install_os_packages() { return 1; }
+vendored_python_archive() { printf '/nonexistent/python.tar.gz\n'; }
 ensure_standalone_python() { STANDALONE_PYTHON=/standalone/python; return 0; }
 ensure_python
 [[ $SYSTEM_PYTHON == /standalone/python ]]
@@ -135,7 +137,59 @@ echo ok
         self.assertEqual(completed.stdout.strip(), "ok")
         self.assertIn("using a static source-tree runtime", completed.stderr)
 
-    def test_verify_sha256_accepts_a_known_digest(self) -> None:
+    def test_download_retries_without_tls_after_certificate_failure(self) -> None:
+        script = r"""
+set -euo pipefail
+ROOT="$1"
+. "$ROOT/scripts/bootstrap.sh"
+insecure_used=0
+download_with_curl() {
+    local destination=$2 insecure=$3
+    if [[ $insecure == 1 ]]; then
+        insecure_used=1
+        printf 'payload\n' >"$destination"
+        return 0
+    fi
+    return 60
+}
+download_with_wget() { return 1; }
+install_ca_certificates() { return 0; }
+file=$(mktemp)
+download_url https://example.invalid/python.tgz "$file"
+[[ $insecure_used == 1 ]]
+[[ $(cat "$file") == payload ]]
+rm -f "$file"
+echo ok
+"""
+        completed = subprocess.run(
+            ["bash", "-c", script, "check", str(ROOT)],
+            check=False,
+            capture_output=True,
+            text=True,
+            env={**os.environ, "LC_ALL": "C"},
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertEqual(completed.stdout.strip(), "ok")
+        self.assertIn("TLS certificate verification failed", completed.stderr)
+
+    def test_apt_package_helper_installs_one_package_at_a_time(self) -> None:
+        script = r"""
+set -euo pipefail
+ROOT="$1"
+. "$ROOT/scripts/bootstrap.sh"
+type _apt_install_one >/dev/null
+type download_with_curl >/dev/null
+echo ok
+"""
+        completed = subprocess.run(
+            ["bash", "-c", script, "check", str(ROOT)],
+            check=False,
+            capture_output=True,
+            text=True,
+            env={**os.environ, "LC_ALL": "C"},
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertEqual(completed.stdout.strip(), "ok")
         script = r"""
 set -euo pipefail
 ROOT="$1"
@@ -146,6 +200,100 @@ digest=$(printf 'zimigrate\n' | sha256sum | awk '{print $1}')
 verify_sha256 "$file" "$digest"
 ! verify_sha256 "$file" 0000000000000000000000000000000000000000000000000000000000000000
 rm -f "$file"
+echo ok
+"""
+        completed = subprocess.run(
+            ["bash", "-c", script, "check", str(ROOT)],
+            check=False,
+            capture_output=True,
+            text=True,
+            env={**os.environ, "LC_ALL": "C"},
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertEqual(completed.stdout.strip(), "ok")
+
+    def test_vendor_ca_bundle_is_preferred(self) -> None:
+        script = r"""
+set -euo pipefail
+ROOT="$1"
+. "$ROOT/scripts/bootstrap.sh"
+[[ $(system_ca_file) == "$ROOT/vendor/certs/cacert.pem" ]]
+echo ok
+"""
+        completed = subprocess.run(
+            ["bash", "-c", script, "check", str(ROOT)],
+            check=False,
+            capture_output=True,
+            text=True,
+            env={**os.environ, "LC_ALL": "C"},
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertEqual(completed.stdout.strip(), "ok")
+
+    def test_vendored_python_archives_match_pinned_digests(self) -> None:
+        script = r"""
+set -euo pipefail
+ROOT="$1"
+. "$ROOT/scripts/bootstrap.sh"
+has_vendor_wheels
+for target in \
+    x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu \
+    x86_64-unknown-linux-musl aarch64-unknown-linux-musl; do
+  archive=$(vendored_python_archive "$target")
+  [[ -f $archive ]]
+  verify_sha256 "$archive" "$(standalone_digest "$target")"
+done
+echo ok
+"""
+        completed = subprocess.run(
+            ["bash", "-c", script, "check", str(ROOT)],
+            check=False,
+            capture_output=True,
+            text=True,
+            env={**os.environ, "LC_ALL": "C"},
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertEqual(completed.stdout.strip(), "ok")
+
+    def test_vendored_python_is_used_before_os_packages(self) -> None:
+        script = r"""
+set -euo pipefail
+ROOT="$1"
+. "$ROOT/scripts/bootstrap.sh"
+find_system_python() { return 1; }
+install_os_packages() { printf 'APT_CALLED\n'; return 1; }
+ensure_standalone_python() { STANDALONE_PYTHON=/standalone/python; return 0; }
+ensure_python
+[[ $SYSTEM_PYTHON == /standalone/python ]]
+echo ok
+"""
+        completed = subprocess.run(
+            ["bash", "-c", script, "check", str(ROOT)],
+            check=False,
+            capture_output=True,
+            text=True,
+            env={**os.environ, "LC_ALL": "C"},
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertEqual(completed.stdout.strip(), "ok")
+        self.assertIn("Using the vendored standalone Python runtime", completed.stderr)
+        self.assertNotIn("APT_CALLED", completed.stdout)
+
+    def test_pip_install_uses_vendor_wheels_offline(self) -> None:
+        script = r"""
+set -euo pipefail
+ROOT="$1"
+. "$ROOT/scripts/bootstrap.sh"
+python=$(mktemp)
+trap 'rm -f "$python"' EXIT
+cat >"$python" <<'PY'
+#!/usr/bin/env bash
+printf '%s\n' "$*"
+exit 0
+PY
+chmod +x "$python"
+output=$(pip_install "$python" "cryptography>=42")
+[[ $output == *-m\ pip\ install*--no-index*--find-links*"$ROOT/vendor/wheels"*"cryptography>=42" ]]
 echo ok
 """
         completed = subprocess.run(
