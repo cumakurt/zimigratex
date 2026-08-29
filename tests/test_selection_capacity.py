@@ -178,11 +178,23 @@ class SelectionCapacityTests(unittest.TestCase):
                     workers=1,
                     drain_completed_artifacts=True,
                 )
+                eight = assess_export_disk(
+                    path,
+                    remaining_accounts=accounts,
+                    mailbox_usage=usage,
+                    include_mailboxes=True,
+                    workers=8,
+                    drain_completed_artifacts=True,
+                )
             self.assertEqual(stored.status, "insufficient")
             self.assertEqual(drained.status, "sufficient")
             self.assertLess(
                 drained.estimated_required_free_bytes,
                 stored.estimated_required_free_bytes,
+            )
+            self.assertLess(
+                drained.estimated_required_free_bytes,
+                eight.estimated_required_free_bytes,
             )
 
 

@@ -13,6 +13,7 @@ from zimigrate.config import EndpointConfig
 from zimigrate.errors import CommandError, Interrupted
 from zimigrate.interrupt import InterruptController, get_interrupt, stop_process
 from zimigrate.models import CommandResult
+from zimigrate.ssh import SshSession
 
 LOGGER = logging.getLogger(__name__)
 POLL_SECONDS = 0.25
@@ -20,11 +21,21 @@ POLL_SECONDS = 0.25
 
 class CommandRunner:
     def __init__(
-        self, endpoint: EndpointConfig, *, retries: int, retry_base_seconds: float
+        self,
+        endpoint: EndpointConfig,
+        *,
+        retries: int,
+        retry_base_seconds: float,
+        session: SshSession | None = None,
     ) -> None:
         self.endpoint = endpoint
         self.retries = retries
         self.retry_base_seconds = retry_base_seconds
+        self.session = session
+
+    @property
+    def is_remote(self) -> bool:
+        return self.session is not None
 
     def run(
         self,
@@ -95,6 +106,7 @@ class CommandRunner:
                 stdin=subprocess.PIPE if input_data is not None else None,
                 stdout=stdout_target,
                 stderr=subprocess.PIPE,
+                env=self.session.process_env() if self.session is not None else None,
                 start_new_session=True,
             )
             interrupt.register(process)
@@ -155,9 +167,16 @@ class CommandRunner:
         return CommandResult(stdout=stdout, stderr=stderr, returncode=process.returncode)
 
     def _transport_command(self, arguments: list[str]) -> list[str]:
-        return [*self._privilege_prefix(), "env", "LC_ALL=C", *arguments]
+        command = [*self._privilege_prefix(), "env", "LC_ALL=C", *arguments]
+        if self.session is None:
+            return command
+        return self.session.remote_argv(command)
 
     def _privilege_prefix(self) -> list[str]:
+        if self.session is not None:
+            if self.session.user == self.endpoint.zimbra_user:
+                return []
+            return ["sudo", "-n", "-u", self.endpoint.zimbra_user, "--"]
         if getpass.getuser() == self.endpoint.zimbra_user:
             return []
         return ["sudo", "-n", "-u", self.endpoint.zimbra_user, "--"]

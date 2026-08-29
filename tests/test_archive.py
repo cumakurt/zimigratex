@@ -128,6 +128,29 @@ class ArchiveTests(unittest.TestCase):
             with self.assertRaisesRegex(ArchiveError, "Checkpoint database is corrupt"):
                 MigrationArchive(root, create=False)
 
+    def test_archive_rejects_objects_without_a_manifest(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "archive"
+            (root / "objects" / "domain").mkdir(parents=True)
+            (root / "objects" / "domain" / "example.json").write_text("{}", encoding="utf-8")
+            with self.assertRaisesRegex(ArchiveError, "without a manifest"):
+                MigrationArchive(root, create=True)
+
+    def test_in_progress_remote_export_may_lack_a_manifest(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "archive"
+            (root / "objects" / "domain").mkdir(parents=True)
+            (root / "objects" / "domain" / "example.json").write_text("{}", encoding="utf-8")
+            reports = root / "reports"
+            reports.mkdir()
+            (reports / "remote-export.json").write_text(
+                '{"schema_version":1,"target_ip":"10.1.0.20"}\n',
+                encoding="utf-8",
+            )
+            archive = MigrationArchive(root, create=True)
+            archive.close_state()
+            self.assertTrue((root / "state.sqlite3").is_file())
+
     def test_archive_rejects_unreferenced_entity_files(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory) / "archive"

@@ -1,19 +1,21 @@
 from __future__ import annotations
 
 import io
+import tempfile
 import unittest
 from contextlib import nullcontext, redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-from zimigrate.cli import DEFAULT_ARCHIVE, build_parser, main
+from zimigrate.archive import MigrationArchive
+from zimigrate.cli import DEFAULT_ARCHIVE, _configure_export_categories, build_parser, main
 from zimigrate.config import (
     AppConfig,
     EndpointConfig,
     ImportConfig,
     TransferConfig,
 )
-from zimigrate.errors import ArchiveError
+from zimigrate.errors import ArchiveError, ConfigurationError
 
 
 class CliTests(unittest.TestCase):
@@ -157,28 +159,131 @@ class CliTests(unittest.TestCase):
         self.assertEqual(result, 1)
         importer.assert_not_called()
 
-    def test_export_target_ip_runs_remote_orchestrator(self) -> None:
+    def test_export_target_ip_runs_local_exporter_over_ssh(self) -> None:
         config = _config()
         archive = MagicMock()
         archive.lock.return_value = nullcontext()
         archive.manifest.return_value = None
-        remote = MagicMock(return_value={"host": "192.0.2.10", "completed": True})
+        archive.root = Path("export_data")
+        session = MagicMock()
+        session.user = "root"
+        session.auth_method = "key"
+        exporter = MagicMock()
+        exporter.run.return_value = {"export:account": 1}
 
         with (
             patch("zimigrate.cli.configure_logging"),
             patch("zimigrate.cli.load_config", return_value=config),
             patch("zimigrate.cli.MigrationArchive", return_value=archive),
-            patch("zimigrate.cli.run_remote_export", remote),
-            patch("zimigrate.cli.Exporter") as exporter,
+            patch("zimigrate.cli.connect_ssh", return_value=session) as connect,
+            patch("zimigrate.cli.bind_remote_export") as bind,
+            patch("zimigrate.cli.Exporter", return_value=exporter) as exporter_cls,
             redirect_stdout(io.StringIO()),
         ):
             result = main(["export", "--target-ip", "192.0.2.10"])
 
         self.assertEqual(result, 0)
-        remote.assert_called_once()
-        self.assertEqual(remote.call_args.kwargs["host"], "192.0.2.10")
-        self.assertEqual(remote.call_args.kwargs["ssh_user"], "root")
-        exporter.assert_not_called()
+        connect.assert_called_once_with("192.0.2.10", user="root")
+        bind.assert_called_once()
+        self.assertEqual(bind.call_args.kwargs["host"], "192.0.2.10")
+        exporter_cls.assert_called_once()
+        self.assertIs(exporter_cls.call_args.kwargs["session"], session)
+        exporter.run.assert_called_once_with()
+        session.close.assert_called_once()
+
+    def test_drain_mode_does_not_reenter_ssh_orchestrator(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            archive_path = Path(directory) / "export_data"
+            archive = MigrationArchive(archive_path, create=True)
+            reports = archive.root / "reports"
+            reports.mkdir(exist_ok=True)
+            (reports / "remote-export.json").write_text(
+                '{"schema_version":1,"target_ip":"10.1.0.20","ssh_user":"root",'
+                '"archive_id":"abc","remote_root":"/var/tmp/zimigratex/abc",'
+                '"auth":"key","categories":["domains","cos","accounts","mailboxes"]}\n',
+                encoding="utf-8",
+            )
+            exporter = MagicMock()
+            exporter.run.return_value = {"export:account": 1}
+            connect = MagicMock()
+            with (
+                patch("zimigrate.cli.configure_logging"),
+                patch("zimigrate.cli.load_config", return_value=_config()),
+                patch("zimigrate.cli.Exporter", return_value=exporter),
+                patch("zimigrate.cli.connect_ssh", connect),
+                patch.dict("os.environ", {"ZIMIGRATE_EXPORT_DRAIN": "1"}),
+                redirect_stdout(io.StringIO()),
+            ):
+                result = main(["export", "--archive", str(archive_path)])
+            self.assertEqual(result, 0)
+            exporter.run.assert_called_once_with()
+            connect.assert_not_called()
+
+    def test_export_categories_resume_from_remote_meta(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            archive = MigrationArchive(Path(directory) / "export_data", create=True)
+            reports = archive.root / "reports"
+            reports.mkdir(exist_ok=True)
+            (reports / "remote-export.json").write_text(
+                '{"schema_version":1,"target_ip":"10.1.0.20","ssh_user":"root",'
+                '"archive_id":"abc","remote_root":"/var/tmp/zimigratex/abc",'
+                '"auth":"password","categories":["domains","cos","accounts","mailboxes"]}\n',
+                encoding="utf-8",
+            )
+            with (
+                patch("zimigrate.cli._is_interactive", return_value=False),
+                patch("zimigrate.cli.prompt_categories", side_effect=AssertionError("prompted")),
+            ):
+                updated = _configure_export_categories(_config(), archive)
+            self.assertTrue(updated.transfer.include_mailboxes)
+            self.assertTrue(updated.transfer.include_accounts)
+            self.assertFalse(updated.transfer.include_distribution_lists)
+
+    def test_interactive_export_prompts_even_when_remote_categories_are_stored(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            archive = MigrationArchive(Path(directory) / "export_data", create=True)
+            reports = archive.root / "reports"
+            reports.mkdir(exist_ok=True)
+            (reports / "remote-export.json").write_text(
+                '{"schema_version":1,"target_ip":"10.1.0.20","ssh_user":"root",'
+                '"archive_id":"abc","remote_root":"/var/tmp/zimigratex/abc",'
+                '"auth":"key","categories":["domains","cos","accounts","mailboxes"]}\n',
+                encoding="utf-8",
+            )
+            with (
+                patch("zimigrate.cli._is_interactive", return_value=True),
+                patch(
+                    "zimigrate.cli.prompt_categories",
+                    return_value={"domains", "cos", "accounts"},
+                ) as prompt,
+            ):
+                updated = _configure_export_categories(_config(), archive)
+            prompt.assert_called_once()
+            self.assertEqual(
+                prompt.call_args.kwargs["defaults"],
+                {"domains", "cos", "accounts", "mailboxes"},
+            )
+            self.assertTrue(updated.transfer.include_accounts)
+            self.assertFalse(updated.transfer.include_mailboxes)
+
+    def test_interactive_export_rejects_category_change_after_manifest(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            archive = MigrationArchive(Path(directory) / "export_data", create=True)
+            (archive.root / "manifest.json").write_text(
+                '{"schema_version":1,"export_options":{"include_domains":true,'
+                '"include_cos":true,"include_accounts":true,"include_mailboxes":true,'
+                '"include_distribution_lists":false}}\n',
+                encoding="utf-8",
+            )
+            with (
+                patch("zimigrate.cli._is_interactive", return_value=True),
+                patch(
+                    "zimigrate.cli.prompt_categories",
+                    return_value={"domains"},
+                ),
+                self.assertRaises(ConfigurationError),
+            ):
+                _configure_export_categories(_config(), archive)
 
 
 def _config() -> AppConfig:

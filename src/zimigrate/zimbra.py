@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import base64
+import getpass
 import logging
+import os
+import pwd
 import re
 from binascii import Error as Base64Error
 from pathlib import Path
@@ -11,6 +14,7 @@ from zimigrate.config import EndpointConfig, TransferConfig
 from zimigrate.errors import CommandError, CompatibilityError, ZimigrateError
 from zimigrate.models import Attributes
 from zimigrate.runner import CommandRunner
+from zimigrate.ssh import SshSession
 from zimigrate.util import is_valid_dns_name
 
 LOGGER = logging.getLogger(__name__)
@@ -28,6 +32,7 @@ ZIMBRA_INBOX_FOLDER_ID = "2"
 # than the LDIF alphabet.
 ATTRIBUTE_LINE = re.compile(r"^([A-Za-z][A-Za-z0-9._-]*)(::?)(?: ?)(.*)$")
 HELP_COMMAND = re.compile(r"^\s*([A-Za-z][A-Za-z0-9]*)\(([^)]+)\)", re.MULTILINE)
+MAILBOX_OUTPUT_OPTION = re.compile(r"(?:^|\s)(?:-o/--output|--output|-o(?:\s|$))")
 QUERY_SAFE = ":/*@"
 MISSING_OBJECT_MARKERS = (
     "account.no_such_account",
@@ -292,11 +297,16 @@ class ZimbraClient:
         *,
         retries: int,
         retry_base_seconds: float,
+        session: SshSession | None = None,
     ) -> None:
         self.endpoint = endpoint
         self.runner = CommandRunner(
-            endpoint, retries=retries, retry_base_seconds=retry_base_seconds
+            endpoint,
+            retries=retries,
+            retry_base_seconds=retry_base_seconds,
+            session=session,
         )
+        self._mailbox_output_supported: bool | None = None
 
     def version(self) -> str:
         result = self.runner.run([ZMCONTROL, "-v"], retryable=True)
@@ -327,10 +337,9 @@ class ZimbraClient:
                 required_mailbox_commands or set(),
                 utility="zmmailbox",
             )
-            if require_mailbox_output and not re.search(
-                r"(?:^|\s)(?:-o/--output|--output|-o(?:\s|$))",
-                mailbox_help,
-            ):
+            supports_output = bool(MAILBOX_OUTPUT_OPTION.search(mailbox_help))
+            self._mailbox_output_supported = supports_output
+            if require_mailbox_output and not supports_output:
                 raise CompatibilityError("zmmailbox getRestURL does not support --output")
         return version
 
@@ -682,17 +691,56 @@ class ZimbraClient:
         url: str,
         output_path: Path,
     ) -> None:
-        # zmmailbox writes status to stdout; -o keeps the archive off that stream.
         output_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        command = [ZMMAILBOX, *options, "-t", "0", "getRestURL"]
+        if self._uses_mailbox_output_file():
+            # Newer zmmailbox writes status to stdout; -o keeps the archive off that stream.
+            self._grant_zimbra_write_access(output_path.parent)
+            command.extend(["-o", str(output_path), url])
+            extra: dict[str, Path] = {}
+        else:
+            # Remote SSH and Zimbra 8.6 stream the archive on stdout. Never use -o
+            # over SSH: that would create the file on the source host.
+            command.append(url)
+            extra = {"output_path": output_path}
         try:
             self.runner.run(
-                [ZMMAILBOX, *options, "-t", "0", "getRestURL", "-o", str(output_path), url],
+                command,
                 timeout=self.endpoint.mailbox_timeout_seconds,
                 retryable=True,
+                **extra,
             )
+            if extra and (not output_path.is_file() or output_path.stat().st_size == 0):
+                output_path.unlink(missing_ok=True)
+                raise CommandError("Mailbox export produced no data", retryable=True)
         except Exception:
             output_path.unlink(missing_ok=True)
             raise
+
+    def _uses_mailbox_output_file(self) -> bool:
+        if self.runner.is_remote:
+            return False
+        return self._mailbox_output_supported is not False
+
+    def _grant_zimbra_write_access(self, path: Path) -> None:
+        """zmmailbox runs as zimbra and must be able to create the -o file."""
+        user = self.endpoint.zimbra_user
+        if getpass.getuser() == user:
+            return
+        resolved = path.resolve()
+        if "mailboxes" not in resolved.parts:
+            return
+        try:
+            info = pwd.getpwnam(user)
+        except KeyError:
+            return
+        for candidate in (resolved, *resolved.parents):
+            try:
+                os.chown(candidate, info.pw_uid, info.pw_gid)
+            except OSError:
+                break
+            if candidate.name == "mailboxes":
+                break
 
     def _mailbox_options(self, account: str, mailbox_host: str | None) -> list[str]:
         options = ["-z"]

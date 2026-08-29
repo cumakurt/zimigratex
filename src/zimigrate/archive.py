@@ -30,6 +30,7 @@ from zimigrate.util import (
 
 SCHEMA_VERSION = 1
 ENCRYPTED_ARCHIVE_MARKERS = (".manifest.zmenc", "salt.bin", ".keycheck")
+REMOTE_EXPORT_META_RELATIVE = "reports/remote-export.json"
 
 
 class MigrationArchive:
@@ -47,8 +48,11 @@ class MigrationArchive:
         os.chmod(self.root, 0o700)
         _reject_encrypted_archive(self.root)
         manifest_path = ensure_relative_path(self.root, "manifest.json")
-        if not manifest_path.exists() and any(
-            (self.root / name).exists() for name in ("objects", "mailboxes")
+        # Remote export may pull leftover objects before Zimbra writes manifest.json.
+        if (
+            not manifest_path.exists()
+            and any((self.root / name).exists() for name in ("objects", "mailboxes"))
+            and not (self.root / REMOTE_EXPORT_META_RELATIVE).is_file()
         ):
             raise ArchiveError(
                 "Archive data exists without a manifest; use a clean archive directory"

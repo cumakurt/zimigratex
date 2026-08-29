@@ -12,12 +12,17 @@ from zimigrate import __version__
 from zimigrate.archive import MigrationArchive
 from zimigrate.backups import discover_backups, prompt_backup_choice
 from zimigrate.config import AppConfig, load_config
+from zimigrate.drain import export_drain_enabled, operator_prompts_enabled
 from zimigrate.errors import ConfigurationError, Interrupted, ZimigrateError
 from zimigrate.exporter import Exporter
 from zimigrate.importer import Importer
 from zimigrate.interrupt import get_interrupt, handle_sigint
 from zimigrate.logging_setup import configure_logging
-from zimigrate.remote_export import resolve_remote_host, run_remote_export
+from zimigrate.remote_export import (
+    bind_remote_export,
+    resolve_remote_host,
+    stored_export_categories,
+)
 from zimigrate.scope import (
     apply_scope_to_transfer,
     parse_bound_scope,
@@ -34,6 +39,7 @@ from zimigrate.selection import (
     selected_categories,
     transfer_with_categories,
 )
+from zimigrate.ssh import connect_ssh
 from zimigrate.state import StateStore
 from zimigrate.target_verifier import TargetVerifier
 from zimigrate.verifier import verify_archive
@@ -58,7 +64,7 @@ def build_parser() -> argparse.ArgumentParser:
     commands = parser.add_subparsers(dest="command", required=True)
 
     command_descriptions = {
-        "export": "export Zimbra into a resumable archive; use --target-ip to run it over SSH",
+        "export": "export Zimbra into a resumable archive; use --target-ip to stream it over SSH",
         "import": "validate an archive and import it into the local Zimbra server",
         "verify": "validate archive structure and mailbox artifacts",
         "verify-target": "compare imported destination objects with the archive",
@@ -96,7 +102,7 @@ def build_parser() -> argparse.ArgumentParser:
     commands.choices["export"].add_argument(
         "--target-ip",
         metavar="HOST",
-        help="SSH to this Zimbra host, run export there, and store the archive locally",
+        help="SSH to this Zimbra host and stream zmprov/zmmailbox output into the local archive",
     )
     commands.choices["export"].add_argument(
         "--ssh-user",
@@ -127,7 +133,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     arguments = parser.parse_args(argv)
     remote_host = None
-    if arguments.command == "export":
+    if arguments.command == "export" and not export_drain_enabled():
         remote_host = resolve_remote_host(arguments.archive, getattr(arguments, "target_ip", None))
     logging_session = configure_logging(
         verbose=arguments.verbose,
@@ -138,6 +144,7 @@ def main(argv: list[str] | None = None) -> int:
     interrupt.clear()
     previous_handler = signal.getsignal(signal.SIGINT)
     signal.signal(signal.SIGINT, handle_sigint)
+    session = None
     try:
         if arguments.command == "status":
             state_path = arguments.archive / "state.sqlite3"
@@ -181,14 +188,27 @@ def main(argv: list[str] | None = None) -> int:
                 config = _configure_export_categories(config, archive)
                 logging_session.start()
                 if remote_host:
-                    result = run_remote_export(
-                        archive,
-                        config.transfer,
-                        host=remote_host,
-                        ssh_user=getattr(arguments, "ssh_user", "root"),
-                        verbose=arguments.verbose,
-                        json_logs=arguments.json_logs,
+                    session = connect_ssh(
+                        remote_host,
+                        user=getattr(arguments, "ssh_user", "root"),
                     )
+                    bind_remote_export(
+                        archive,
+                        host=remote_host,
+                        ssh_user=session.user,
+                        auth=session.auth_method,
+                        categories=tuple(sorted(selected_categories(config.transfer))),
+                    )
+                    LOGGER.info(
+                        "Streaming source commands over SSH; mailbox data is written here",
+                        extra={
+                            "host": remote_host,
+                            "archive": str(archive.root),
+                            "auth": session.auth_method,
+                            "workers": config.transfer.workers,
+                        },
+                    )
+                    result = Exporter(config, archive, session=session).run()
                 else:
                     result = Exporter(config, archive).run()
         elif arguments.command == "import":
@@ -268,6 +288,8 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 130
     finally:
+        if session is not None:
+            session.close()
         logging_session.close()
         signal.signal(signal.SIGINT, previous_handler)
 
@@ -327,36 +349,62 @@ def _configure_export_categories(
 ) -> AppConfig:
     manifest = archive.manifest(optional=True)
     cli_scope = scope_from_transfer(config.transfer)
+    locked_categories: set[str] | None = None
+    locked_transfer = config.transfer
     if manifest:
-        selected = exported_categories(manifest.get("export_options"))
-        transfer = transfer_with_categories(config.transfer, selected)
-        transfer = restore_scope_from_export_options(transfer, manifest.get("export_options"))
-        archived_scope = scope_from_transfer(transfer)
+        locked_categories = exported_categories(manifest.get("export_options"))
+        locked_transfer = transfer_with_categories(config.transfer, locked_categories)
+        locked_transfer = restore_scope_from_export_options(
+            locked_transfer,
+            manifest.get("export_options"),
+        )
+        archived_scope = scope_from_transfer(locked_transfer)
         if cli_scope.active and cli_scope != archived_scope:
             raise ConfigurationError(
                 "Resume must use the same --user/--domain values as the existing archive"
             )
+    stored_categories = (
+        None if locked_categories is not None else stored_export_categories(archive.root)
+    )
+    if _is_interactive():
+        defaults = locked_categories or stored_categories or selected_categories(config.transfer)
+        selected = prompt_categories(
+            "export",
+            available=all_categories(),
+            defaults=defaults,
+        )
+        if locked_categories is not None and selected != locked_categories:
+            raise ConfigurationError(
+                "This archive already started with different categories; "
+                "use a new archive directory to change the selection"
+            )
+        transfer = transfer_with_categories(config.transfer, selected)
+        if manifest:
+            transfer = restore_scope_from_export_options(transfer, manifest.get("export_options"))
+        return replace(config, transfer=transfer)
+    if locked_categories is not None:
         LOGGER.info(
             "Resuming with the archive's locked export categories",
-            extra={"categories": sorted(selected)},
+            extra={"categories": sorted(locked_categories)},
         )
-        return replace(config, transfer=transfer)
+        return replace(config, transfer=locked_transfer)
     if cli_scope.active:
         LOGGER.info(
             "Limiting export to selected users and domains",
             extra={**cli_scope.as_options(), "event": "inventory"},
         )
         return config
-    if _is_interactive():
-        selected = prompt_categories(
-            "export",
-            available=all_categories(),
-            defaults=selected_categories(config.transfer),
+    if stored_categories:
+        LOGGER.info(
+            "Resuming with the stored remote-export categories",
+            extra={"categories": sorted(stored_categories)},
         )
-    else:
-        selected = selected_categories(config.transfer)
-    transfer = transfer_with_categories(config.transfer, selected)
-    return replace(config, transfer=transfer)
+        return replace(
+            config,
+            transfer=transfer_with_categories(config.transfer, stored_categories),
+        )
+    selected = selected_categories(config.transfer)
+    return replace(config, transfer=transfer_with_categories(config.transfer, selected))
 
 
 def _configure_import_categories(
@@ -440,4 +488,4 @@ def _has_option(argv: list[str], option: str) -> bool:
 
 
 def _is_interactive() -> bool:
-    return sys.stdin.isatty()
+    return operator_prompts_enabled() and sys.stdin.isatty()

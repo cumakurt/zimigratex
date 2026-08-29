@@ -6,12 +6,13 @@ trusted encrypted storage, limit operating-system access, and securely dispose o
 after the migration retention period.
 
 The default export and import run only against the Zimbra installation on the current
-machine. `export --target-ip` is opt-in SSH: OpenSSH and rsync copy this toolkit to the
-Zimbra host, run local `zmprov` there, and copy each completed mailbox artifact to the
-operator workstation before deleting it on the Zimbra host. Key authentication is tried
-first. A password is requested only when key login fails, is stored in a mode `0600`
-temporary file for OpenSSH ASKPASS, and is never passed as a process argument. TOML
-`[source]` / `[target]` SSH settings remain rejected.
+machine. `export --target-ip` is opt-in SSH: OpenSSH runs `zmprov` and `zmmailbox`
+on the source host and streams mailbox archives on SSH stdout into the local
+archive. The source host does not receive this toolkit and does not write mailbox
+export files. Key authentication is tried first. A password is requested only when
+key login fails, is stored in a mode `0600` temporary file for OpenSSH ASKPASS, and
+is never passed as a process argument. TOML `[source]` / `[target]` SSH settings
+remain rejected.
 
 It uses shell-free subprocess execution and runs local Zimbra administrative commands
 under the `zimbra` operating-system account. Sensitive provisioning values, including

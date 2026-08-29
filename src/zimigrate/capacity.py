@@ -137,10 +137,10 @@ def assess_export_disk(
         METADATA_BASE_BYTES + len(remaining_accounts) * METADATA_PER_ACCOUNT_BYTES
     )
     if drain_completed_artifacts:
-        # Completed mailbox files are copied off this host immediately, so free
-        # space only needs to cover metadata plus in-flight worker output.
+        # Each worker writes one mailbox, then waits until it is copied off
+        # this host. Temporary and drained files do not overlap for that worker.
         estimated_archive_growth_bytes = estimated_metadata_bytes
-        estimated_resident_bytes = estimated_metadata_bytes + estimated_temporary_bytes * 2
+        estimated_resident_bytes = estimated_metadata_bytes + estimated_temporary_bytes
     else:
         estimated_archive_growth_bytes = estimated_archive_mailbox_bytes + estimated_metadata_bytes
         estimated_resident_bytes = estimated_archive_growth_bytes + estimated_temporary_bytes

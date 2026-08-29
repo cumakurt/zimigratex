@@ -129,7 +129,7 @@ Yalnızca export:
 
 | Seçenek | Anlamı |
 | --- | --- |
-| `--target-ip HOST` | Bu Zimbra’ya SSH, export orada, arşiv burada |
+| `--target-ip HOST` | Bu Zimbra’ya SSH; `zmprov` / `zmmailbox` çıktısı yerel arşive stream edilir |
 | `--ssh-user NAME` | SSH kullanıcı adı (varsayılan: `root`) |
 
 `verify` ayrıca `--deep` alır (her mailbox ZIP/TGZ taraması). Import bu taramayı
@@ -170,7 +170,7 @@ TTY’de kategori menüsü çıkar. Enter tüm varsayılanları (tüm kategorile
 
 ### 2. İş istasyonundan uzak export
 
-`ssh` ve `rsync` olan bir makineden (Zimbra olmak zorunda değil):
+`ssh` olan bir makineden (Zimbra olmak zorunda değil):
 
 ```bash
 ./export.sh --target-ip 192.0.2.10
@@ -179,21 +179,23 @@ TTY’de kategori menüsü çıkar. Enter tüm varsayılanları (tüm kategorile
 
 Davranış:
 
-1. Kategori menüsü (ve verilmişse `--user` / `--domain`) **bu** makinede çalışır.
+1. TTY’de kategori menüsü SSH’dan önce her zaman **bu** makinede çıkar. Önceki
+   seçim varsayılan olarak sunulur; menü atlanmaz. Manifest yazıldıktan sonra
+   farklı seçim reddedilir (yeni arşiv dizini kullanın). Zimbra menüyü göstermez.
 2. SSH önce `--ssh-user` (varsayılan `root`) ile anahtar dener. Olursa parola
    sorulmaz.
 3. Anahtar başarısızsa ve stdin TTY ise kullanıcı adı (varsayılan `root`) ve
    parola istenir. Parola `ssh` komut satırına yazılmaz.
-4. Bu depo Zimbra’da `/var/tmp/zimigratex/<arşiv-id>/` altına kopyalanır.
-5. Export orada çalışır. Her tamamlanan mailbox dosyası hemen buraya `rsync`
-   edilir, sonra Zimbra’dan silinir; uzak diskte tam yedek birikmez.
-6. Tam arşiv için yer **bu makinede** gerekir. Zimbra’da yalnızca işlemdeki tepe
-   (worker’lar ve henüz çekilmemiş dosya) ölçülür. Rapor:
-   `export_data/reports/export-disk-assessment.json`.
+4. Proses burada kalır. `zmprov` / `zmmailbox` kaynakta SSH ile çalışır.
+   Mailbox arşivleri SSH stdout ile `./export_data/` altına yazılır. Kaynak
+   sunucuda TGZ/ZIP oluşmaz. Boş veya başarısız stream silinir ve yeniden
+   denenir.
+5. Paralellik yapılandırılmış `workers` değeridir. Tam arşiv için yer **bu
+   makinede** gerekir.
+   Rapor: `export_data/reports/export-disk-assessment.json`.
 
 Aynı dizinde `--target-ip` ile veya onsuz devam edin. Arşiv ilk hosta bağlıdır;
-farklı `--target-ip` reddedilir. Buradaki mailbox dosyaları Zimbra’ya geri
-kopyalanmaz.
+farklı `--target-ip` reddedilir.
 
 Parola ile SSH için TTY gerekir. Etkileşimsiz uzak export için SSH anahtarı
 çalışmalıdır. Uzak sunucu `zimbra` olarak veya `sudo -n -u zimbra` ile `zmprov`
@@ -333,8 +335,8 @@ zimigrate preflight --side both
 yedek pay. Yetersiz alan veri yazılmadan durur.
 `export_data/reports/export-disk-assessment.json`.
 
-`--target-ip` ile Zimbra’daki ölçüm yalnızca işlemdeki dosyalar içindir. Tam
-arşiv için iş istasyonunu boyutlandırın.
+`--target-ip` ile disk ölçümü **bu** makinededir (tam arşiv). Kaynak sunucu
+mailbox staging diski olarak kullanılmaz.
 
 **Import:** `zmvolume -l` message/index volume’leri ve geçici alan; her arşiv
 üyesinin **açılmış** boyutu. Yetersiz alan durur.
@@ -486,8 +488,8 @@ tekrar çalıştırın.
 - kurulu Zimbra sürümünün desteklediği 64-bit x86_64 glibc Linux;
 - **yerel** export/import: `/opt/zimbra/bin/zmprov`, `zmmailbox`, `zmcontrol`,
   `zmhostname`; `zimbra` kullanıcısı veya `sudo -n -u zimbra`;
-- **uzak** export: yerelde `ssh` ve `rsync`; Zimbra tarafında yine yukarıdaki
-  komutlar;
+- **uzak** export: yerelde `ssh`; Zimbra tarafında yine yukarıdaki komutlar,
+  `zimbra` veya `sudo -n -u zimbra` ile;
 - iş istasyonu/arşiv için yeterli alan ve worker başına bir şifresiz mailbox
   parçası kadar geçici alan;
 - `zmprov` çalışan makinede preflight’tan geçen yerel Zimbra FOSS.

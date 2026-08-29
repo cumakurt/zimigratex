@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import base64
+import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import MagicMock
+from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
 
 from zimigrate.config import AppConfig, EndpointConfig, ImportConfig, TransferConfig
 from zimigrate.errors import CommandError, CompatibilityError, ZimigrateError
@@ -142,6 +144,7 @@ class ZimbraCommandTests(unittest.TestCase):
     def setUp(self) -> None:
         self.client = ZimbraClient(EndpointConfig(), retries=0, retry_base_seconds=0)
         self.client.runner = MagicMock()
+        self.client.runner.is_remote = False
         self.client.runner.run.return_value = CommandResult("", "", 0)
 
     def test_preflight_validates_required_commands_and_safe_file_output(self) -> None:
@@ -242,6 +245,70 @@ class ZimbraCommandTests(unittest.TestCase):
         self.client.runner.run.assert_called_once()
         self.assertTrue(self.client.runner.run.call_args.kwargs.get("retryable"))
         self.assertIsNone(self.client.runner.run.call_args.kwargs.get("output_path"))
+
+    def test_remote_mailbox_export_streams_stdout_without_output_file(self) -> None:
+        session = MagicMock()
+        session.user = "root"
+        self.client = ZimbraClient(
+            EndpointConfig(),
+            retries=0,
+            retry_base_seconds=0,
+            session=session,
+        )
+        self.client.runner = MagicMock()
+        self.client.runner.is_remote = True
+        self.client.runner.run.return_value = CommandResult("", "", 0)
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "mailbox.tgz"
+            output.write_bytes(b"archive")
+            self.client.export_mailbox("user@example.com", "is:anywhere", output)
+        command = self.client.runner.run.call_args.args[0]
+        self.assertNotIn("-o", command)
+        self.assertEqual(self.client.runner.run.call_args.kwargs.get("output_path"), output)
+
+    def test_local_mailbox_export_streams_when_output_option_is_missing(self) -> None:
+        self.client._mailbox_output_supported = False
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "mailbox.tgz"
+            output.write_bytes(b"archive")
+            self.client.export_mailbox("user@example.com", "is:anywhere", output)
+        command = self.client.runner.run.call_args.args[0]
+        self.assertNotIn("-o", command)
+        self.assertEqual(self.client.runner.run.call_args.kwargs.get("output_path"), output)
+
+    def test_streamed_mailbox_export_rejects_an_empty_download(self) -> None:
+        self.client._mailbox_output_supported = False
+
+        def write_empty(*_args: object, output_path: Path | None = None, **_kwargs: object):
+            if output_path is not None:
+                output_path.write_bytes(b"")
+            return CommandResult("", "", 0)
+
+        self.client.runner.run.side_effect = write_empty
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "mailbox.tgz"
+            with self.assertRaisesRegex(CommandError, "produced no data"):
+                self.client.export_mailbox("user@example.com", "is:anywhere", output)
+            self.assertFalse(output.is_file())
+
+    def test_mailbox_export_chowns_mailbox_dirs_when_not_zimbra(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "mailboxes" / "user@example.com" / "full.tgz"
+            owner = SimpleNamespace(pw_uid=107, pw_gid=107)
+            with (
+                patch("zimigrate.zimbra.getpass.getuser", return_value="root"),
+                patch("zimigrate.zimbra.pwd.getpwnam", return_value=owner),
+                patch("zimigrate.zimbra.os.chown") as chown,
+            ):
+                self.client.export_mailbox(
+                    "user@example.com",
+                    "is:anywhere",
+                    output,
+                )
+            chowned = {Path(call.args[0]) for call in chown.call_args_list}
+            self.assertIn(output.parent.resolve(), chowned)
+            self.assertIn((output.parent.parent).resolve(), chowned)
+            self.assertTrue(all(call.args[1:] == (107, 107) for call in chown.call_args_list))
 
     def test_mailbox_export_does_not_silently_drop_requested_lock(self) -> None:
         self.client.runner.run.side_effect = CommandError("unknown parameter lock")

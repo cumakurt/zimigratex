@@ -4,8 +4,10 @@ import tempfile
 import threading
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from zimigrate.drain import (
+    operator_prompts_enabled,
     parse_drain_request,
     request_mailbox_drain,
     validate_mailbox_relative,
@@ -68,6 +70,13 @@ class DrainTests(unittest.TestCase):
             )
             self.assertTrue(path.is_file())
             self.assertFalse((Path(directory) / "reports" / "drain-ready").exists())
+
+    def test_orchestrated_export_disables_operator_prompts(self) -> None:
+        self.assertTrue(operator_prompts_enabled())
+        with patch.dict("os.environ", {"ZIMIGRATE_EXPORT_DRAIN": "1"}):
+            self.assertFalse(operator_prompts_enabled())
+        with patch.dict("os.environ", {"ZIMIGRATE_NONINTERACTIVE": "1"}):
+            self.assertFalse(operator_prompts_enabled())
 
 
 if __name__ == "__main__":

@@ -1,7 +1,8 @@
-"""Opt-in SSH/rsync session for remote Zimbra export orchestration."""
+"""Opt-in SSH session for streaming remote Zimbra commands."""
 
 from __future__ import annotations
 
+import functools
 import logging
 import os
 import re
@@ -20,6 +21,7 @@ from zimigrate.util import is_valid_ssh_target
 
 LOGGER = logging.getLogger(__name__)
 SSH_USER = re.compile(r"^[A-Za-z_][A-Za-z0-9_.-]*$")
+REMOTE_NAME_PATTERN = re.compile(r"^[\w.*?-]+$")
 CONNECT_TIMEOUT_SECONDS = 20
 
 
@@ -48,11 +50,10 @@ class SshSession:
         self._control_path: Path | None = None
         self._master_started = False
         ssh = shutil.which("ssh")
-        rsync = shutil.which("rsync")
-        if ssh is None or rsync is None:
-            raise ZimigrateError("Remote export requires the local ssh and rsync commands")
+        if ssh is None:
+            raise ZimigrateError("Remote export requires the local ssh command")
         self._ssh = ssh
-        self._rsync = rsync
+        self._rsync = shutil.which("rsync")
 
     @property
     def auth_method(self) -> str:
@@ -147,7 +148,67 @@ class SshSession:
             excludes=excludes,
         )
 
-    def _remote_argv(self, remote_command: Sequence[str], *, tty: bool) -> list[str]:
+    def remote_has_files(self, remote_dir: str, name_pattern: str) -> bool:
+        if not REMOTE_NAME_PATTERN.fullmatch(name_pattern):
+            raise ZimigrateError("Remote name pattern is invalid")
+        interrupt = get_interrupt()
+        interrupt.check()
+        command = [
+            self._ssh,
+            *self._ssh_options(master="no"),
+            "-T",
+            self._destination(),
+            "--",
+            "find",
+            _absolute_remote(remote_dir),
+            "-maxdepth",
+            "1",
+            "-type",
+            "f",
+            "-name",
+            name_pattern,
+            "-print",
+            "-quit",
+        ]
+        try:
+            completed = subprocess.run(  # nosec B603
+                command,
+                check=False,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                env=self._env(),
+            )
+        except OSError as exc:
+            raise ZimigrateError(f"Cannot execute ssh: {exc}") from exc
+        if interrupt.is_set():
+            raise Interrupted("Interrupted by user")
+        return bool((completed.stdout or b"").strip())
+
+    def capture(self, remote_command: Sequence[str]) -> str:
+        if not remote_command:
+            raise ZimigrateError("Remote command is empty")
+        interrupt = get_interrupt()
+        interrupt.check()
+        try:
+            completed = subprocess.run(  # nosec B603
+                self._remote_argv(remote_command, tty=False),
+                check=False,
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                env=self._env(),
+            )
+        except OSError as exc:
+            raise ZimigrateError(f"Cannot execute ssh: {exc}") from exc
+        if interrupt.is_set():
+            raise Interrupted("Interrupted by user")
+        if completed.returncode != 0:
+            raise ZimigrateError(f"SSH command failed on {self.host} (exit {completed.returncode})")
+        return (completed.stdout or b"").decode("utf-8", errors="replace")
+
+    def remote_argv(self, remote_command: Sequence[str], *, tty: bool = False) -> list[str]:
+        if not remote_command:
+            raise ZimigrateError("Remote command is empty")
         use_tty = tty and sys.stdin.isatty()
         return [
             self._ssh,
@@ -157,6 +218,12 @@ class SshSession:
             "--",
             *remote_command,
         ]
+
+    def process_env(self) -> dict[str, str]:
+        return self._env()
+
+    def _remote_argv(self, remote_command: Sequence[str], *, tty: bool) -> list[str]:
+        return self.remote_argv(remote_command, tty=tty)
 
     def close(self) -> None:
         if self._master_started and self._control_path is not None:
@@ -204,7 +271,7 @@ class SshSession:
             "-o",
             f"ConnectTimeout={CONNECT_TIMEOUT_SECONDS}",
             "-o",
-            "StrictHostKeyChecking=accept-new",
+            f"StrictHostKeyChecking={strict_host_key_checking(self._ssh)}",
             "-o",
             "UpdateHostKeys=yes",
             "-o",
@@ -213,6 +280,12 @@ class SshSession:
             "ControlPersist=300",
             "-o",
             f"ControlMaster={master}",
+            "-o",
+            "Compression=no",
+            "-o",
+            "ServerAliveInterval=30",
+            "-o",
+            "ServerAliveCountMax=20",
             "-p",
             str(self.port),
         ]
@@ -260,6 +333,8 @@ class SshSession:
         delete: bool,
         excludes: Sequence[str] = (),
     ) -> None:
+        if self._rsync is None:
+            raise ZimigrateError("This copy requires the local rsync command")
         interrupt = get_interrupt()
         interrupt.check()
         remote_shell = " ".join(
@@ -272,15 +347,25 @@ class SshSession:
         for pattern in excludes:
             command.extend(["--exclude", pattern])
         command.extend([source, destination])
-        LOGGER.info("Copying files over SSH")
+        LOGGER.debug("Copying files over SSH")
         try:
-            completed = subprocess.run(command, check=False, env=self._env())  # nosec B603
+            completed = subprocess.run(  # nosec B603
+                command,
+                check=False,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+                env=self._env(),
+            )
         except OSError as exc:
             raise ZimigrateError(f"Cannot execute rsync: {exc}") from exc
         if interrupt.is_set():
             raise Interrupted("Interrupted by user")
         if completed.returncode != 0:
-            raise ZimigrateError(f"rsync failed (exit {completed.returncode})")
+            detail = (completed.stderr or b"").decode("utf-8", errors="replace").split()
+            summary = " ".join(detail)[:300]
+            suffix = f": {summary}" if summary else ""
+            raise ZimigrateError(f"rsync failed (exit {completed.returncode}){suffix}")
 
     def _env(self) -> dict[str, str]:
         env = os.environ.copy()
@@ -323,6 +408,25 @@ def connect_ssh(host: str, *, user: str = "root") -> SshSession:
                 f"SSH authentication to {username}@{host} failed"
             ) from password_error
         return session
+
+
+@functools.lru_cache(maxsize=4)
+def strict_host_key_checking(ssh_binary: str) -> str:
+    """Return accept-new when this OpenSSH supports it; otherwise require known_hosts."""
+    try:
+        completed = subprocess.run(  # nosec B603
+            [ssh_binary, "-G", "-o", "StrictHostKeyChecking=accept-new", "127.0.0.1"],
+            check=False,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+        )
+    except OSError:
+        return "yes"
+    stderr = (completed.stderr or b"").decode("utf-8", errors="replace").casefold()
+    if "unsupported option" in stderr or "bad configuration option" in stderr:
+        return "yes"
+    return "accept-new"
 
 
 def _absolute_remote(remote_path: str) -> str:

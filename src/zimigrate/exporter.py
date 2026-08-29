@@ -20,6 +20,7 @@ from zimigrate.interrupt import WorkerPool, bounded_futures
 from zimigrate.models import Artifact, Attributes, EntityRecord
 from zimigrate.progress import PhaseProgress, entity_start_fields
 from zimigrate.scope import scope_from_transfer, selected_accounts, selected_names
+from zimigrate.ssh import SshSession
 from zimigrate.util import atomic_json, ensure_relative_path, open_private_temporary
 from zimigrate.zimbra import ZimbraClient, required_export_commands
 
@@ -27,14 +28,22 @@ LOGGER = logging.getLogger(__name__)
 
 
 class Exporter:
-    def __init__(self, config: AppConfig, archive: MigrationArchive) -> None:
+    def __init__(
+        self,
+        config: AppConfig,
+        archive: MigrationArchive,
+        *,
+        session: SshSession | None = None,
+    ) -> None:
         self.config = config
         self.archive = archive
         self.client = ZimbraClient(
             config.source,
             retries=config.transfer.retries,
             retry_base_seconds=config.transfer.retry_base_seconds,
+            session=session,
         )
+        self._session = session
         self._validated_entity_checkpoints: set[tuple[str, str]] = set()
 
     def run(self) -> dict[str, int]:
@@ -43,7 +52,7 @@ class Exporter:
             require_mailbox=transfer.include_mailboxes,
             required_provisioning_commands=required_export_commands(transfer),
             required_mailbox_commands={"getRestURL"} if transfer.include_mailboxes else set(),
-            require_mailbox_output=transfer.include_mailboxes,
+            require_mailbox_output=transfer.include_mailboxes and self._session is None,
         )
         source_host = self.client.hostname()
         export_options = self._export_options()

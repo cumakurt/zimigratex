@@ -127,7 +127,7 @@ Export-only:
 
 | Option | Meaning |
 | --- | --- |
-| `--target-ip HOST` | SSH to this Zimbra host, run export there, keep the archive here |
+| `--target-ip HOST` | SSH to this Zimbra host and stream `zmprov` / `zmmailbox` into the local archive |
 | `--ssh-user NAME` | SSH username (default: `root`) |
 
 `verify` also accepts `--deep` (scan every mailbox ZIP/TGZ). Import always does that
@@ -168,7 +168,7 @@ to resume.
 
 ### 2. Remote export from a workstation
 
-From a machine that has `ssh` and `rsync` (not necessarily Zimbra):
+From a machine that has `ssh` (not necessarily Zimbra):
 
 ```bash
 ./export.sh --target-ip 192.0.2.10
@@ -177,22 +177,23 @@ From a machine that has `ssh` and `rsync` (not necessarily Zimbra):
 
 Behavior:
 
-1. Category menu (and `--user` / `--domain` if given) runs on **this** machine.
+1. On a TTY the category menu always runs on **this** machine before SSH.
+   A previous selection is offered as the default; it does not skip the menu.
+   After a manifest exists, a different selection is rejected (use a new archive
+   directory). The Zimbra host never shows the menu.
 2. SSH tries key login as `--ssh-user` (default `root`). If that works, no password
    is requested.
 3. If key login fails and stdin is a TTY, zimigrate asks for username (default
    `root`) and password. The password is never placed on the `ssh` command line.
-4. This repository is copied to `/var/tmp/zimigratex/<archive-id>/` on the Zimbra host.
-5. Export runs there. Each completed mailbox file is rsync'd here immediately, then
-   deleted on Zimbra, so remote disk stays near in-flight worker output, not the full
-   backup.
-6. The workstation must have room for the **entire** archive. Zimbra is checked only
-   for in-flight peak (workers plus the file waiting to be pulled). Report:
-   `export_data/reports/export-disk-assessment.json`.
+4. This process stays here. `zmprov` / `zmmailbox` run on the source over SSH.
+   Mailbox archives stream on SSH stdout into `./export_data/`. The source never
+   writes a TGZ or ZIP. A zero-byte or failed stream is deleted and retried.
+5. Parallel workers are the configured `workers` value. This machine must have
+   room for the **entire** archive.
+   Report: `export_data/reports/export-disk-assessment.json`.
 
 Resume the same directory with or without `--target-ip`. The archive is bound to the
-original host; a different `--target-ip` is rejected. Mailbox files already on this
-machine are not copied back to Zimbra.
+original host; a different `--target-ip` is rejected.
 
 Password SSH needs a TTY. Non-interactive remote export needs working SSH keys.
 The remote host must run `zmprov` as `zimbra` or via `sudo -n -u zimbra`.
@@ -333,8 +334,8 @@ zimigrate preflight --side both
 safety reserve. Insufficient space aborts before data is written.
 `export_data/reports/export-disk-assessment.json`.
 
-With `--target-ip`, that check on Zimbra covers in-flight files only. Size the
-workstation for the full archive.
+With `--target-ip`, that check is on **this** machine (the full archive). The
+source host is not used as mailbox staging disk.
 
 **Import:** `zmvolume -l` message/index volumes and temporary space, using each
 archive member's **expanded** size. Insufficient space aborts.
@@ -483,8 +484,8 @@ again.
 - a 64-bit x86_64 glibc Linux host supported by the installed Zimbra release;
 - for **local** export/import: `/opt/zimbra/bin/zmprov`, `zmmailbox`, `zmcontrol`,
   `zmhostname`; run as `zimbra` or with `sudo -n -u zimbra`;
-- for **remote** export: local `ssh` and `rsync`; the Zimbra host still needs the
-  commands above;
+- for **remote** export: local `ssh`; the Zimbra host still needs the commands
+  above, reached as `zimbra` or via `sudo -n -u zimbra`;
 - enough workstation/archive space, plus temporary space for one plaintext mailbox
   chunk per worker;
 - a local Zimbra FOSS installation that passes preflight (on the machine that runs

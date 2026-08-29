@@ -13,6 +13,7 @@ from zimigrate.util import atomic_json, ensure_relative_path, read_json
 
 LOGGER = logging.getLogger(__name__)
 EXPORT_DRAIN_ENV = "ZIMIGRATE_EXPORT_DRAIN"
+NONINTERACTIVE_ENV = "ZIMIGRATE_NONINTERACTIVE"
 DRAIN_READY_RELATIVE = "reports/drain-ready"
 MAILBOX_PREFIX = "mailboxes/"
 WAIT_POLL_SECONDS = 0.5
@@ -20,6 +21,13 @@ WAIT_POLL_SECONDS = 0.5
 
 def export_drain_enabled() -> bool:
     return os.environ.get(EXPORT_DRAIN_ENV) == "1"
+
+
+def operator_prompts_enabled() -> bool:
+    if export_drain_enabled():
+        return False
+    value = os.environ.get(NONINTERACTIVE_ENV, "").casefold()
+    return value not in {"1", "true", "yes", "on"}
 
 
 def request_mailbox_drain(

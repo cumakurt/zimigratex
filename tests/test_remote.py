@@ -7,13 +7,15 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from zimigrate.archive import MigrationArchive
-from zimigrate.config import TransferConfig, load_config
+from zimigrate.config import EndpointConfig
 from zimigrate.errors import ConfigurationError
 from zimigrate.remote_export import (
-    _write_transfer_toml,
+    bind_remote_export,
     resolve_remote_host,
-    run_remote_export,
+    stored_export_categories,
 )
+from zimigrate.runner import CommandRunner
+from zimigrate.ssh import SshSession, strict_host_key_checking
 from zimigrate.ssh_askpass import main as askpass_main
 from zimigrate.util import is_valid_ssh_target
 
@@ -32,8 +34,7 @@ class RemoteExportTests(unittest.TestCase):
             reports.mkdir()
             (reports / "remote-export.json").write_text(
                 '{"target_ip":"192.0.2.10","ssh_user":"root","archive_id":"abc",'
-                '"remote_root":"/var/tmp/zimigratex/abc","auth":"key",'
-                '"schema_version":1}\n',
+                '"auth":"key","schema_version":1}\n',
                 encoding="utf-8",
             )
             self.assertEqual(resolve_remote_host(root, None), "192.0.2.10")
@@ -41,19 +42,21 @@ class RemoteExportTests(unittest.TestCase):
             with self.assertRaises(ConfigurationError):
                 resolve_remote_host(root, "192.0.2.11")
 
-    def test_transfer_toml_round_trip(self) -> None:
+    def test_bind_remote_export_writes_host_and_categories(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "remote-transfer.toml"
-            transfer = TransferConfig(
-                include_mailboxes=False,
-                target_domains=("example.com",),
-                workers=4,
+            archive = MigrationArchive(Path(directory) / "export_data", create=True)
+            bind_remote_export(
+                archive,
+                host="192.0.2.10",
+                ssh_user="root",
+                auth="key",
+                categories=("accounts", "cos", "domains"),
             )
-            _write_transfer_toml(path, transfer)
-            loaded = load_config(path).transfer
-            self.assertFalse(loaded.include_mailboxes)
-            self.assertEqual(loaded.target_domains, ("example.com",))
-            self.assertEqual(loaded.workers, 4)
+            stored = stored_export_categories(archive.root)
+            self.assertEqual(stored, {"accounts", "cos", "domains"})
+            meta = (archive.root / "reports" / "remote-export.json").read_text(encoding="utf-8")
+            self.assertIn("192.0.2.10", meta)
+            self.assertNotIn("remote_root", meta)
 
     def test_askpass_reads_password_file(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -66,81 +69,56 @@ class RemoteExportTests(unittest.TestCase):
                 self.assertEqual(askpass_main(), 0)
             self.assertEqual(stdout.getvalue(), "secret-value")
 
-    def test_remote_export_copies_then_runs_then_pulls(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            archive = MigrationArchive(Path(directory) / "export_data", create=True)
-            session = MagicMock()
-            session.user = "root"
-            session.auth_method = "key"
-            process = MagicMock()
-            process.poll.return_value = 0
-            process.returncode = 0
-            session.start.return_value = process
-            with (
-                patch("zimigrate.remote_export.find_tool_root", return_value=Path(directory)),
-                patch("zimigrate.remote_export.connect_ssh", return_value=session),
-            ):
-                result = run_remote_export(
-                    archive,
-                    TransferConfig(include_mailboxes=False),
-                    host="192.0.2.10",
-                    ssh_user="root",
-                )
-            session.run.assert_called()
-            self.assertTrue(
-                any(
-                    call.args and call.args[0][:2] == ["mkdir", "-p"]
-                    for call in session.run.call_args_list
-                )
-            )
-            self.assertTrue(session.rsync_to_remote.called)
-            self.assertTrue(session.rsync_from_remote.called)
-            self.assertTrue(session.start.called)
-            started = session.start.call_args[0][0]
-            self.assertEqual(started[0], "env")
-            self.assertIn("ZIMIGRATE_EXPORT_DRAIN=1", started)
-            self.assertTrue(
-                any(
-                    "mailboxes" in call.kwargs.get("excludes", ())
-                    for call in session.rsync_to_remote.call_args_list
-                )
-            )
-            self.assertTrue(session.close.called)
-            self.assertEqual(result["host"], "192.0.2.10")
-            self.assertTrue((archive.root / "reports" / "remote-export.json").is_file())
+    def test_runner_wraps_remote_commands_with_sudo_unless_login_is_zimbra(self) -> None:
+        session = MagicMock()
+        session.user = "root"
+        session.remote_argv.side_effect = lambda command, tty=False: ["ssh", "--", *command]
+        runner = CommandRunner(
+            EndpointConfig(),
+            retries=0,
+            retry_base_seconds=0,
+            session=session,
+        )
+        self.assertTrue(runner.is_remote)
+        transported = runner._transport_command(["/opt/zimbra/bin/zmprov", "help"])
+        self.assertEqual(
+            transported,
+            [
+                "ssh",
+                "--",
+                "sudo",
+                "-n",
+                "-u",
+                "zimbra",
+                "--",
+                "env",
+                "LC_ALL=C",
+                "/opt/zimbra/bin/zmprov",
+                "help",
+            ],
+        )
+        session.user = "zimbra"
+        transported = runner._transport_command(["/opt/zimbra/bin/zmmailbox", "help"])
+        self.assertEqual(
+            transported,
+            ["ssh", "--", "env", "LC_ALL=C", "/opt/zimbra/bin/zmmailbox", "help"],
+        )
 
-    def test_drain_copies_ready_mailbox_then_deletes_remote_copy(self) -> None:
-        from zimigrate.remote_export import drain_ready_mailboxes
+    def test_ssh_options_disable_compression_and_keep_the_session_alive(self) -> None:
+        session = SshSession("192.0.2.10", user="root")
+        session._control_path = Path("/tmp/zimigrate-ssh-test/mux")
+        options = session._ssh_options(master="no")
+        self.assertIn("Compression=no", options)
+        self.assertIn("ServerAliveInterval=30", options)
+        self.assertIn("ServerAliveCountMax=20", options)
 
-        with tempfile.TemporaryDirectory() as directory:
-            local_root = Path(directory)
-            relative = "mailboxes/user/full.tgz"
-            ready = local_root / "reports" / "drain-ready"
-            ready.mkdir(parents=True)
-            marker = ready / "abc.json"
-            marker.write_text(
-                '{"path":"mailboxes/user/full.tgz","sha256":"abc","size":4}\n',
-                encoding="utf-8",
-            )
-            session = MagicMock()
-
-            def fake_rsync_file(remote_file: str, local_file: Path) -> None:
-                local_file.parent.mkdir(parents=True, exist_ok=True)
-                local_file.write_bytes(b"data")
-
-            session.rsync_file_from_remote.side_effect = fake_rsync_file
-            pulled = drain_ready_mailboxes(session, "/var/tmp/zimigratex/id/archive", local_root)
-            self.assertEqual(pulled, 1)
-            self.assertEqual((local_root / relative).read_bytes(), b"data")
-            session.run.assert_called_with(
-                [
-                    "rm",
-                    "-f",
-                    "/var/tmp/zimigratex/id/archive/mailboxes/user/full.tgz",
-                    "/var/tmp/zimigratex/id/archive/reports/drain-ready/abc.json",
-                ]
-            )
-            self.assertFalse(marker.is_file())
+    def test_strict_host_key_checking_falls_back_on_old_openssh(self) -> None:
+        completed = MagicMock()
+        completed.stderr = b'command-line line 0: unsupported option "accept-new".\n'
+        with patch("zimigrate.ssh.subprocess.run", return_value=completed):
+            strict_host_key_checking.cache_clear()
+            self.assertEqual(strict_host_key_checking("/usr/bin/ssh"), "yes")
+            strict_host_key_checking.cache_clear()
 
 
 if __name__ == "__main__":
