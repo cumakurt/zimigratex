@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 import re
 import tomllib
 from dataclasses import dataclass, field
@@ -34,21 +33,15 @@ class EndpointConfig:
 
 @dataclass(frozen=True, slots=True)
 class ArchiveConfig:
-    encryption_enabled: bool = True
-    passphrase_env: str = "ZIMIGRATE_ARCHIVE_PASSPHRASE"
-    allow_unencrypted: bool = False
-
-    def passphrase(self) -> str | None:
-        return os.environ.get(self.passphrase_env)
+    """Archive layout options. Encryption is not supported."""
 
     def validate(self) -> None:
-        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", self.passphrase_env):
-            raise ConfigurationError("archive.passphrase_env is not a valid environment name")
+        return
 
 
 @dataclass(frozen=True, slots=True)
 class TransferConfig:
-    workers: int = 4
+    workers: int = 8
     retries: int = 3
     retry_base_seconds: float = 1.0
     include_domains: bool = True
@@ -157,12 +150,6 @@ class AppConfig:
         self.archive.validate()
         self.transfer.validate()
         self.import_options.validate()
-        if not self.archive.encryption_enabled and not self.archive.allow_unencrypted:
-            raise ConfigurationError(
-                "Unencrypted archives require archive.allow_unencrypted = true"
-            )
-        if self.transfer.include_secrets and not self.archive.encryption_enabled:
-            raise ConfigurationError("Secret export requires archive encryption")
 
 
 def load_config(path: Path | None = None) -> AppConfig:
@@ -224,17 +211,17 @@ def _endpoint(raw: dict[str, Any], label: str) -> EndpointConfig:
     )
 
 
+REMOVED_ARCHIVE_KEYS = {"encryption_enabled", "passphrase_env", "allow_unencrypted"}
+
+
 def _archive(raw: dict[str, Any]) -> ArchiveConfig:
-    _reject_unknown(
-        raw,
-        {"encryption_enabled", "passphrase_env", "allow_unencrypted"},
-        "archive",
-    )
-    return ArchiveConfig(
-        encryption_enabled=_boolean(raw, "encryption_enabled", True, "archive"),
-        passphrase_env=_string(raw, "passphrase_env", "ZIMIGRATE_ARCHIVE_PASSPHRASE", "archive"),
-        allow_unencrypted=_boolean(raw, "allow_unencrypted", False, "archive"),
-    )
+    if removed := sorted(REMOVED_ARCHIVE_KEYS.intersection(raw)):
+        raise ConfigurationError(
+            "Archive encryption was removed; drop "
+            f"{removed[0]} from the [archive] configuration table"
+        )
+    _reject_unknown(raw, set(), "archive")
+    return ArchiveConfig()
 
 
 def _transfer(raw: dict[str, Any]) -> TransferConfig:
@@ -263,7 +250,7 @@ def _transfer(raw: dict[str, Any]) -> TransferConfig:
     }
     _reject_unknown(raw, allowed, "transfer")
     return TransferConfig(
-        workers=_integer(raw, "workers", 4, "transfer"),
+        workers=_integer(raw, "workers", 8, "transfer"),
         retries=_integer(raw, "retries", 3, "transfer"),
         retry_base_seconds=_number(raw, "retry_base_seconds", 1.0, "transfer"),
         include_domains=_boolean(raw, "include_domains", True, "transfer"),

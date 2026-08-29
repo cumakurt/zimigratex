@@ -3,7 +3,7 @@
 [English documentation](README.md)
 
 `zimigrate`, bir Zimbra sunucusundaki hesapları, domainleri, listeleri, ayarları ve
-mailbox içeriklerini şifreli ve kaldığı yerden devam edebilen yerel bir arşive aktarır.
+mailbox içeriklerini kaldığı yerden devam edebilen yerel bir arşive aktarır.
 Bu arşiv kullanıcı tarafından hedef Zimbra sunucusuna taşındıktan sonra yine yerel
 olarak içe alınır. Export ve import tek bir Zimbra sürümüne kilitlenmez;
 `zmprov`, `zmmailbox` ve `zmcontrol` komutlarının varlığını denetler. Uygulama SSH ile
@@ -22,7 +22,7 @@ bulunduğunuz dizinde oluşur; yeterli boş alan olan bir volume'e geçip şunu 
 /path/to/zimigratex/export.sh
 ```
 
-Komut sizden arşiv parolasını iki kez ister, yerel Zimbra kurulumundaki aktarılabilir
+Komut yerel Zimbra kurulumundaki aktarılabilir
 verileri dışa aktarır ve bulunduğunuz dizinde şu klasörü oluşturur:
 
 ```text
@@ -66,8 +66,8 @@ edin; `--user`/`--domain` değiştirmek için export'ta yeni arşiv dizini, impo
 `state.sqlite3` olan bir arşiv kopyası gerekir.
 
 Export işlemi tamamen durduktan sonra `export_data` klasörünü olduğu gibi yeni sunucuya
-manuel olarak taşıyın. Dosya izinleriyle birlikte `.keycheck` gibi gizli dosyaların da
-korunması gerekir; buna `.manifest.zmenc` de dahildir. Örneğin bağlı bir haricî disk veya
+manuel olarak taşıyın. Dosya izinleriyle birlikte `manifest.json` dosyasının da
+korunması gerekir. Örneğin bağlı bir haricî disk veya
 ağ diski kullanılıyorsa:
 
 ```bash
@@ -93,7 +93,7 @@ Ardından yalnızca şu komutu çalıştırın:
 /path/to/zimigratex/import.sh
 ```
 
-Komut export sırasında kullandığınız parolayı bir kez ister. Hedef Zimbra üzerinde
+Komut hedef Zimbra üzerinde
 herhangi bir değişiklik yapmadan önce `export_data` içindeki bütün aktarım kayıtlarını
 ve mailbox arşivlerini doğrular. Doğrulamanın tamamı başarılı olursa bulunduğu makinedeki
 Zimbra sürümünü kontrol eder ve yerel import işlemini başlatır.
@@ -132,12 +132,10 @@ gibi yeniden hash'lemez. Bu yazımdan sonra zimigrate SOAP `zmprov fc account`
 `zimigrate import`, aşağıdaki kontrollerin hepsini import başlamadan önce yapar:
 
 - Manifestin tamamlanmış ve desteklenen şemada olması
-- Arşiv parolasının doğruluğu
-- Şifrelenmiş bütün kayıtların AES-GCM kimlik doğrulaması
-- Her domain, COS, hesap, kaynak ve dağıtım listesi kaydının çözülebilmesi
+- Her domain, COS, hesap, kaynak ve dağıtım listesi kaydının okunabilmesi
 - Manifestteki nesne sayılarıyla bulunan nesne sayılarının eşleşmesi
-- Her mailbox dosyasının şifreli SHA-256 değerinin eşleşmesi
-- Çözülmüş mailbox dosyasının plaintext SHA-256 değerinin eşleşmesi
+- Her mailbox dosyasının SHA-256 değerinin eşleşmesi
+- Mailbox dosyasının içerik SHA-256 değerinin eşleşmesi
 - Bütün ZIP/TGZ dosyalarının açılabilir, bozulmamış ve güvenli dosya yollarına sahip
   olması
 
@@ -169,14 +167,15 @@ domainler, COS'lar, dağıtım listeleri ve mailbox içerikleri varsayılan akı
 
 Zimbra dört veri kaynağı credential alanını kaynak `zimbraDataSourceId` değerine bağlı
 biçimde kodlar. Export bu alanları yalnızca proses içinde Zimbra'nın uzun süredir
-kullandığı LDAP kodlamasıyla çözer, plaintext'i hemen AES-GCM arşivine alır ve hedefin
+kullandığı LDAP kodlamasıyla çözer, plaintext'i arşive yazar ve hedefin
 yeni veri kaynağı ID'si ile yeniden şifrelemesini sağlar. LDAP ciphertext'ini doğrudan
 kopyalamak kullanılamayan credential üretirdi.
 
 ## Gereksinimler
 
 - Python 3.11 veya üzeri
-- Python `cryptography` paketi
+- Python `rich` paketi
+- Zimbra FOSS'un desteklediği 64-bit x86_64 glibc Linux (RHEL 7–9, Ubuntu 18.04–24.04 LTS, Oracle Linux, Rocky Linux)
 - `zimigrate` paketinin hem kaynak hem hedef sunucuda kurulu olması
 - Yerel sunucuda `/opt/zimbra/bin/zmprov`, `zmmailbox`, `zmcontrol` ve `zmhostname`
 - `zimbra` kullanıcısı olarak çalışma veya yerel `sudo -n -u zimbra` yetkisi
@@ -198,7 +197,7 @@ paket yeniden kurulur. Ek argümanlar iletilir; örneğin
 `./export.sh --archive /srv/migration/export_data`.
 
 Depoyu `vendor/` ile birlikte kopyalayın. Sarmalayıcılar `vendor/python/` içindeki
-eşleşen CPython arşivini açar, `cryptography` ve `rich` paketlerini `vendor/wheels/`
+x86_64 glibc CPython arşivini açar, `rich` paketini `vendor/wheels/`
 üzerinden PyPI'ye bağlanmadan kurar ve hâlâ indirme gerekirse
 `vendor/certs/cacert.pem` kullanır. Bu dosyaları interneti olan bir makinede yenilemek
 için:
@@ -212,7 +211,7 @@ bağımsız CPython 3.12 çalışma zamanını indirir, SHA-256 özetini doğrul
 `python3-venv` gibi isteğe bağlı paketlerin yokluğu `ca-certificates` kurulumunu
 engellemez. TLS güven deposu GitHub'ı doğrulayamazsa indirme CA paketinden sonra ve
 son çare olarak TLS doğrulaması olmadan yinelenir; sabit SHA-256 özeti değiştirilmiş
-bir arşivi yine reddeder. Sanal ortam hâlâ oluşturulamazsa `cryptography` ve `rich`
+bir arşivi yine reddeder. Sanal ortam hâlâ oluşturulamazsa `rich`
 `.runtime/` altına kurulur ve `zimigrate` depo `src/` ağacından çalışır.
 
 Elle kurulum da kullanılabilir:
@@ -235,25 +234,6 @@ komutu göndermez.
 hesabın `zimbraMailHost` sunucusundan alınabilir. Bu davranış SSH ile komut çalıştırmak
 değildir ve mailbox içeriğinin doğru düğümden alınması için gereklidir.
 
-## Arşiv parolası
-
-Etkileşimli export yeni bir arşiv oluştururken parolayı iki kez sorar. Devam eden export
-ve import parolayı bir kez sorar. Parola en az 16 karakter olmalı, unutulmamalı ve hedef
-sunucuya güvenli bir kanalla ulaştırılmalıdır. Parola `export_data` içine veya ayar
-dosyasına yazılmaz.
-
-Etkileşimsiz kullanım gerekiyorsa ortam değişkeni kullanılabilir:
-
-```bash
-read -rs ZIMIGRATE_ARCHIVE_PASSPHRASE
-export ZIMIGRATE_ARCHIVE_PASSPHRASE
-zimigrate export
-unset ZIMIGRATE_ARCHIVE_PASSPHRASE
-```
-
-`zimigrate`, Zimbra alt süreçlerini başlatmadan önce parola değişkenini kendi süreç
-ortamından kaldırır.
-
 ## Durum ve bağımsız doğrulama
 
 Bütün komutlar varsayılan olarak geçerli dizindeki `export_data` klasörünü kullanır:
@@ -264,7 +244,7 @@ zimigrate verify --deep
 zimigrate verify-target
 ```
 
-`status` için parola gerekmez. `verify --deep`, import komutunun her çalışmada otomatik
+`verify --deep`, import komutunun her çalışmada otomatik
 yaptığı arşiv doğrulamasını import başlatmadan ayrıca çalıştırır.
 
 ## İsteğe bağlı gelişmiş yapılandırma
@@ -273,7 +253,7 @@ Argümansız kullanım güvenli varsayımlarla gelir:
 
 - Bütün normal hesaplar seçilir.
 - Mailbox içerikleri ve görüntülenebilen parola hash'leri export edilir.
-- Dört adet sınırlı worker kullanılır.
+- Sekiz adet sınırlı worker kullanılır.
 - Geçici hatalar sınırlı ve üstel gecikmeli olarak yeniden denenir.
 - Hedefte var olan nesneler `merge` politikasıyla birleştirilir.
 - Mailbox çakışmalarında güvenli `skip` politikası kullanılır.
@@ -319,25 +299,20 @@ checkpoint'e bağlanır ve devam eden bir import sırasında sessizce değiştir
 
 ## Güvenlik ve güvenilirlik
 
-- Arşiv AES-256-GCM ile şifrelenir ve scrypt ile anahtar türetilir.
-- Kayıtlarla birlikte manifest de kimlik doğrulamalıdır; okunabilir `manifest.json`
-  bilgilendirme amaçlıdır, şifreli arşivlerde `.manifest.zmenc` yetkili kayıttır.
-- Şifreli ve şifresiz içerik için SHA-256 bütünlük değerleri tutulur.
+- Kayıtlar ve mailbox içerikleri düz metin olarak saklanır.
+- SHA-256 bütünlük değerleri tutulur.
 - Arşiv dizini `0700`, hassas dosyalar `0600` izinleriyle oluşturulur.
 - Dosyalar atomik olarak yazılır.
 - Her bağımsız işlem SQLite checkpoint'e kaydedilir.
 - Worker havuzları sınırlıdır; kontrolsüz thread oluşturulmaz.
 - Hassas `zmprov` değerleri proses argümanları yerine stdin batch akışından verilir.
-- Şifresiz mailbox parçaları yalnızca işlem sırasında `export_data/.tmp` altında tutulur
+- Geçici mailbox parçaları yalnızca işlem sırasında `export_data/.tmp` altında tutulur
   ve sonra kaldırılır.
 
-`.manifest.zmenc` içermeyen eski bir şifreli arşiv, importtan önce güncel sürümle kaynak
-sunucuda bir kez resume edilmelidir. Böylece nihai envanter kimlik doğrulamalı hale gelir.
-
 `zimigrate` çalışırken `export_data` klasörünü kopyalamayın. Klasörü güvenilir, tercihen
-disk şifrelemeli bir dosya sisteminde tutun. İçerikler şifreli olsa da hesap adları,
-manifest ve checkpoint metadata bilgileri görülebilir. Ayrıntılar için
-[SECURITY.md](SECURITY.md) dosyasına bakın.
+disk şifrelemeli bir dosya sisteminde tutun. Arşiv hesap adları, secret export açıksa
+parola hash'leri, mailbox içeriği ve checkpoint metadata bilgilerini içerir. Ayrıntılar
+için [SECURITY.md](SECURITY.md) dosyasına bakın.
 
 ## Bilinen sınırlar
 

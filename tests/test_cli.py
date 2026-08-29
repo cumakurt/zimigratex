@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import io
-import os
 import unittest
 from contextlib import nullcontext, redirect_stderr, redirect_stdout
 from pathlib import Path
@@ -60,7 +59,6 @@ class CliTests(unittest.TestCase):
             DEFAULT_ARCHIVE,
             config.archive,
             create=True,
-            passphrase=None,
         )
         exporter.run.assert_called_once_with()
         importer.assert_not_called()
@@ -133,42 +131,6 @@ class CliTests(unittest.TestCase):
         self.assertEqual(events, ["verify", "import", "target"])
         verifier.assert_called_once_with(archive, deep=True, workers=config.transfer.workers)
 
-    def test_environment_passphrase_is_not_inherited_by_zimbra_commands(self) -> None:
-        config = AppConfig(
-            source=EndpointConfig(),
-            target=EndpointConfig(),
-            archive=ArchiveConfig(passphrase_env="TEST_CLI_ARCHIVE_KEY"),
-            transfer=TransferConfig(),
-            import_options=ImportConfig(),
-        )
-        archive = MagicMock()
-        archive.lock.return_value = nullcontext()
-        exporter = MagicMock()
-        exporter.run.side_effect = lambda: (
-            self.assertNotIn("TEST_CLI_ARCHIVE_KEY", os.environ) or {}
-        )
-
-        with (
-            patch.dict(
-                os.environ,
-                {"TEST_CLI_ARCHIVE_KEY": "correct horse battery staple"},
-            ),
-            patch("zimigrate.cli.configure_logging"),
-            patch("zimigrate.cli.load_config", return_value=config),
-            patch("zimigrate.cli.MigrationArchive", return_value=archive) as migration_archive,
-            patch("zimigrate.cli.Exporter", return_value=exporter),
-            redirect_stdout(io.StringIO()),
-        ):
-            result = main(["export"])
-
-        self.assertEqual(result, 0)
-        migration_archive.assert_called_once_with(
-            DEFAULT_ARCHIVE,
-            config.archive,
-            create=True,
-            passphrase="correct horse battery staple",
-        )
-
     def test_failed_import_validation_prevents_target_mutation(self) -> None:
         config = _unencrypted_config()
         archive = MagicMock()
@@ -195,7 +157,7 @@ def _unencrypted_config() -> AppConfig:
     return AppConfig(
         source=EndpointConfig(),
         target=EndpointConfig(),
-        archive=ArchiveConfig(encryption_enabled=False, allow_unencrypted=True),
+        archive=ArchiveConfig(),
         transfer=TransferConfig(include_secrets=False),
         import_options=ImportConfig(),
     )

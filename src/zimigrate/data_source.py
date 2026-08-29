@@ -6,9 +6,7 @@ import base64
 import hashlib
 from binascii import Error as Base64Error
 
-from cryptography.hazmat.primitives import padding
-from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
-
+from zimigrate.aes import aes128_ecb_decrypt
 from zimigrate.errors import ArchiveError
 from zimigrate.models import Attributes
 
@@ -48,16 +46,9 @@ def _decrypt_secret(value: str, data_source_id: str) -> str:
         salt = payload[1 : 1 + SALT_SIZE]
         ciphertext = payload[1 + SALT_SIZE :]
         # Zimbra's long-standing LDAP data-source encoding (FOSS 8.x-10.x) derives
-        # this storage key with MD5. The resulting plaintext is immediately protected
-        # by zimigrate's AES-GCM archive.
+        # this storage key with MD5. Plaintext is written only into the local archive.
         key = hashlib.md5(salt + data_source_id.encode("utf-8"), usedforsecurity=False).digest()
-        decryptor = Cipher(
-            algorithms.AES(key),
-            modes.ECB(),  # nosec B305
-        ).decryptor()
-        padded = decryptor.update(ciphertext) + decryptor.finalize()
-        unpadder = padding.PKCS7(AES_BLOCK_BITS).unpadder()
-        return (unpadder.update(padded) + unpadder.finalize()).decode("utf-8")
+        return aes128_ecb_decrypt(key, ciphertext).decode("utf-8")
     except (Base64Error, UnicodeDecodeError, ValueError) as exc:
         raise ArchiveError(
             "Data source credential does not use the supported Zimbra encoding"

@@ -74,7 +74,7 @@ set -euo pipefail
 ROOT="$1"
 . "$ROOT/scripts/bootstrap.sh"
 target=$(standalone_target)
-[[ "$target" == *-unknown-linux-gnu || "$target" == *-unknown-linux-musl ]]
+[[ "$target" == x86_64-unknown-linux-gnu ]]
 [[ $(standalone_digest x86_64-unknown-linux-gnu) == \
     7ce4a71285d913955a76053cc7605ea96da8ecada54dba9cf395245961816421 ]]
 [[ $(standalone_archive_name x86_64-unknown-linux-gnu) == \
@@ -236,13 +236,10 @@ set -euo pipefail
 ROOT="$1"
 . "$ROOT/scripts/bootstrap.sh"
 has_vendor_wheels
-for target in \
-    x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu \
-    x86_64-unknown-linux-musl aarch64-unknown-linux-musl; do
-  archive=$(vendored_python_archive "$target")
-  [[ -f $archive ]]
-  verify_sha256 "$archive" "$(standalone_digest "$target")"
-done
+archive=$(vendored_python_archive x86_64-unknown-linux-gnu)
+[[ -f $archive ]]
+verify_sha256 "$archive" "$(standalone_digest x86_64-unknown-linux-gnu)"
+! standalone_digest aarch64-unknown-linux-gnu
 echo ok
 """
         completed = subprocess.run(
@@ -292,8 +289,8 @@ printf '%s\n' "$*"
 exit 0
 PY
 chmod +x "$python"
-output=$(pip_install "$python" "cryptography>=42")
-[[ $output == *-m\ pip\ install*--no-index*--find-links*"$ROOT/vendor/wheels"*"cryptography>=42" ]]
+output=$(pip_install "$python" "rich>=13.9,<16")
+[[ $output == *-m\ pip\ install*--no-index*--find-links*"$ROOT/vendor/wheels"*"rich>=13.9,<16" ]]
 echo ok
 """
         completed = subprocess.run(

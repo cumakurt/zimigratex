@@ -1,10 +1,8 @@
 from __future__ import annotations
 
 import argparse
-import getpass
 import json
 import logging
-import os
 import signal
 import sys
 from dataclasses import replace
@@ -12,7 +10,7 @@ from pathlib import Path
 
 from zimigrate import __version__
 from zimigrate.archive import MigrationArchive
-from zimigrate.config import AppConfig, ArchiveConfig, load_config
+from zimigrate.config import AppConfig, load_config
 from zimigrate.errors import ConfigurationError, Interrupted, ZimigrateError
 from zimigrate.exporter import Exporter
 from zimigrate.importer import Importer
@@ -44,7 +42,7 @@ LOGGER = logging.getLogger(__name__)
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="zimigrate",
-        description="Encrypted, resumable Zimbra-to-Zimbra migration",
+        description="Resumable Zimbra-to-Zimbra migration",
     )
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     parser.add_argument("--verbose", action="store_true", help="enable diagnostic logging")
@@ -54,7 +52,7 @@ def build_parser() -> argparse.ArgumentParser:
     command_descriptions = {
         "export": "export the local Zimbra server into a resumable archive",
         "import": "validate an archive and import it into the local Zimbra server",
-        "verify": "validate archive structure, authentication, and mailbox artifacts",
+        "verify": "validate archive structure and mailbox artifacts",
         "verify-target": "compare imported destination objects with the archive",
     }
     for name, description in command_descriptions.items():
@@ -85,7 +83,7 @@ def build_parser() -> argparse.ArgumentParser:
             help="limit to this domain and its accounts (repeatable)",
         )
     commands.choices["verify"].add_argument(
-        "--deep", action="store_true", help="decrypt and scan every mailbox archive"
+        "--deep", action="store_true", help="scan every mailbox archive"
     )
 
     preflight = commands.add_parser(
@@ -151,17 +149,11 @@ def main(argv: list[str] | None = None) -> int:
             logging_session.finish("success")
             return 0
 
-        passphrase = _prompt_for_archive_passphrase(
-            config.archive,
-            arguments.archive,
-            creating=arguments.command == "export",
-        )
         if arguments.command == "export":
             archive = MigrationArchive(
                 arguments.archive,
                 config.archive,
                 create=True,
-                passphrase=passphrase,
             )
             with archive.lock():
                 config = _configure_export_categories(config, archive)
@@ -172,7 +164,6 @@ def main(argv: list[str] | None = None) -> int:
                 arguments.archive,
                 config.archive,
                 create=False,
-                passphrase=passphrase,
             )
             with archive.lock():
                 logging_session.start()
@@ -201,7 +192,6 @@ def main(argv: list[str] | None = None) -> int:
                 arguments.archive,
                 config.archive,
                 create=False,
-                passphrase=passphrase,
             )
             with archive.lock():
                 logging_session.start()
@@ -215,7 +205,6 @@ def main(argv: list[str] | None = None) -> int:
                 arguments.archive,
                 config.archive,
                 create=False,
-                passphrase=passphrase,
             )
             with archive.lock():
                 logging_session.start()
@@ -289,31 +278,6 @@ def _apply_cli_scope(config: AppConfig, arguments: argparse.Namespace) -> AppCon
 
 def _print_json(value: object) -> None:
     print(json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True))
-
-
-def _prompt_for_archive_passphrase(
-    config: ArchiveConfig,
-    archive_path: Path,
-    *,
-    creating: bool,
-) -> str | None:
-    if not config.encryption_enabled:
-        return None
-    environment_passphrase = config.passphrase()
-    if environment_passphrase is not None:
-        os.environ.pop(config.passphrase_env, None)
-        return environment_passphrase
-    if not _is_interactive():
-        raise ConfigurationError(
-            f"Archive passphrase is required; set {config.passphrase_env} for non-interactive use"
-        )
-    passphrase = getpass.getpass("Archive passphrase: ")
-    is_new_archive = creating and not (archive_path / ".keycheck").is_file()
-    if is_new_archive:
-        confirmation = getpass.getpass("Confirm archive passphrase: ")
-        if passphrase != confirmation:
-            raise ConfigurationError("Archive passphrases do not match")
-    return passphrase
 
 
 def _configure_export_categories(

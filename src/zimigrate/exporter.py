@@ -488,7 +488,7 @@ class Exporter:
                     size=size,
                     query=query,
                     archive_format=archive_format,
-                    encrypted=self.archive.crypto is not None,
+                    encrypted=False,
                     unpacked_size=unpacked_size,
                 )
                 self.archive.state.succeed(

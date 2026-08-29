@@ -43,7 +43,7 @@ python_has_venv() {
 python_has_migration_imports() {
     local binary=$1
     local pythonpath=$2
-    PYTHONPATH=$pythonpath "$binary" -c 'import zimigrate, cryptography, rich' >/dev/null 2>&1
+    PYTHONPATH=$pythonpath "$binary" -c 'import zimigrate, rich' >/dev/null 2>&1
 }
 
 source_pythonpath() {
@@ -83,7 +83,7 @@ zimigrate_is_ready() {
     local stamp=$ROOT/.venv/.zimigrate-source-stamp
     [[ -x $python ]] || return 1
     python_is_usable "$python" || return 1
-    "$python" -c 'import zimigrate, cryptography, rich' >/dev/null 2>&1 || return 1
+    "$python" -c 'import zimigrate, rich' >/dev/null 2>&1 || return 1
     [[ -x $ROOT/.venv/bin/zimigrate ]] || return 1
     [[ -f $stamp ]] || return 1
     if source_is_newer_than "$stamp"; then
@@ -248,44 +248,36 @@ install_os_packages() {
 }
 
 is_musl() {
-    [[ -e /lib/ld-musl-x86_64.so.1 || -e /lib/ld-musl-aarch64.so.1 ]] && return 0
-    command -v ldd >/dev/null 2>&1 || return 1
-    ldd /bin/sh 2>&1 | grep -qi musl
+    if command -v ldd >/dev/null 2>&1; then
+        ldd /bin/sh 2>&1 | grep -qi musl
+        return
+    fi
+    # Fallback when ldd is missing: a musl-only host has no glibc loader.
+    [[ -e /lib/ld-musl-x86_64.so.1 && ! -e /lib64/ld-linux-x86-64.so.2 ]]
 }
 
 standalone_target() {
-    local arch libc=gnu
+    local arch
     arch=$(uname -m)
     case $arch in
         x86_64 | amd64)
-            arch=x86_64
-            ;;
-        aarch64 | arm64)
-            arch=aarch64
             ;;
         *)
+            log "Zimbra FOSS is distributed for 64-bit x86_64 Linux only (found $arch)"
             return 1
             ;;
     esac
     if is_musl; then
-        libc=musl
+        log "Zimbra is not supported on musl libc; use glibc (RHEL, Ubuntu, Oracle Linux, or Rocky Linux)"
+        return 1
     fi
-    printf '%s-unknown-linux-%s\n' "$arch" "$libc"
+    printf '%s\n' x86_64-unknown-linux-gnu
 }
 
 standalone_digest() {
     case $1 in
-        aarch64-unknown-linux-gnu)
-            printf '%s\n' 4c250ec7cea2aedde2b2e8925d7aaf5ba4924895469d6b5c81c7bdc453341c65
-            ;;
-        aarch64-unknown-linux-musl)
-            printf '%s\n' 92acf3228a5cfe27f492c96e39822d387900eb2cd400c5e93973f32d2fad7fbe
-            ;;
         x86_64-unknown-linux-gnu)
             printf '%s\n' 7ce4a71285d913955a76053cc7605ea96da8ecada54dba9cf395245961816421
-            ;;
-        x86_64-unknown-linux-musl)
-            printf '%s\n' cf814a8afed85f1994a9b7fd16146c7faeac4f21ab68fd91537b357fd0bb0899
             ;;
         *)
             return 1
@@ -578,7 +570,7 @@ install_source_dependencies() {
         "$python" -m ensurepip --upgrade >/dev/null 2>&1 || true
         "$python" -m pip install -q --upgrade pip >/dev/null 2>&1 || true
     fi
-    pip_install "$python" --target "$SITE_PACKAGES" "cryptography>=42" "rich>=13.9,<16"
+    pip_install "$python" --target "$SITE_PACKAGES" "rich>=13.9,<16"
 }
 
 try_source_runtime_install() {

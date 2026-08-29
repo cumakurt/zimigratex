@@ -5,13 +5,13 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "zimigrate"
 version = "0.1.0"
-description = "Resumable, encrypted Zimbra-to-Zimbra migration tooling"
+description = "Resumable Zimbra-to-Zimbra migration tooling"
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "AGPL-3.0-only" }
 authors = [{ name = "Cuma KURT" }]
 maintainers = [{ name = "Cuma KURT" }]
-dependencies = ["cryptography>=42", "rich>=13.9,<16"]
+dependencies = ["rich>=13.9,<16"]
 
 [project.urls]
 Homepage = "https://github.com/cumakurt/zimigratex"

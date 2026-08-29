@@ -31,8 +31,9 @@ class StateStore:
         self._database = sqlite3.connect(
             path, timeout=30, isolation_level=None, check_same_thread=False
         )
+        # WAL + NORMAL keeps checkpoints crash-safe without fsync on every account.
         self._database.execute("PRAGMA journal_mode=WAL")
-        self._database.execute("PRAGMA synchronous=FULL")
+        self._database.execute("PRAGMA synchronous=NORMAL")
         self._database.row_factory = sqlite3.Row
         self._database.executescript(
             """

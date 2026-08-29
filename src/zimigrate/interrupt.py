@@ -148,9 +148,7 @@ def bounded_futures(
     fill()
     while pending:
         interrupt.check()
-        done, _ = wait(pending, timeout=0.25, return_when=FIRST_COMPLETED)
-        if not done:
-            continue
+        done, _ = wait(pending, return_when=FIRST_COMPLETED)
         for future in done:
             value = pending.pop(future)
             fill()

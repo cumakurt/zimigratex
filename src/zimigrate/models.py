@@ -22,7 +22,7 @@ class Artifact:
     size: int
     query: str
     archive_format: str = "tgz"
-    encrypted: bool = True
+    encrypted: bool = False
     unpacked_size: int = 0
 
     def as_dict(self) -> dict[str, Any]:
@@ -54,11 +54,13 @@ class Artifact:
         ):
             raise ValueError("mailbox artifact unpacked size is invalid")
         archive_format = value.get("archive_format", "tgz")
-        encrypted = value.get("encrypted", True)
+        encrypted = value.get("encrypted", False)
         if archive_format not in {"zip", "tgz"}:
             raise ValueError("mailbox artifact format is unsupported")
         if not isinstance(encrypted, bool):
             raise ValueError("mailbox artifact encryption marker is invalid")
+        if encrypted:
+            raise ValueError("encrypted mailbox artifacts are not supported")
         for checksum_name in ("sha256", "plaintext_sha256"):
             checksum = value[checksum_name]
             if len(checksum) != 64 or any(

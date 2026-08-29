@@ -15,19 +15,16 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(config.source.zimbra_user, "zimbra")
         self.assertEqual(config.target.zimbra_user, "zimbra")
         self.assertEqual(config.transfer.account_include, ("*",))
+        self.assertEqual(config.transfer.workers, 8)
         self.assertEqual(config.import_options.expected_target_version_pattern, "")
         self.assertTrue(config.import_options.allows_version("Release 8.8.15.GA FOSS"))
         self.assertTrue(config.import_options.allows_version("Release 9.0.0.GA FOSS"))
         self.assertTrue(config.import_options.allows_version("Release 10.1.18.GA FOSS"))
 
-    def test_secret_export_rejects_unencrypted_archive(self) -> None:
+    def test_removed_archive_encryption_settings_are_rejected(self) -> None:
         config_text = """
 [archive]
-encryption_enabled = false
-allow_unencrypted = true
-
-[transfer]
-include_secrets = true
+encryption_enabled = true
 """
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "config.toml"

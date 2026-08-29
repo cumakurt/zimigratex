@@ -2,7 +2,7 @@
 
 [Türkçe dokümantasyon](README.tr.md)
 
-`zimigrate` creates an encrypted, resumable local export of Zimbra provisioning data
+`zimigrate` creates a resumable local export of Zimbra provisioning data
 and mailbox content, then imports the manually transferred directory on the local
 destination Zimbra server. Export and import probe `zmprov`, `zmmailbox`, and
 `zmcontrol` instead of requiring a single Zimbra release. It does not connect to
@@ -20,7 +20,7 @@ current working directory, so change to a volume with enough free space and run:
 /path/to/zimigratex/export.sh
 ```
 
-The command asks for an archive passphrase, exports all selected data from the local
+The command exports all selected data from the local
 Zimbra installation, and creates:
 
 ```text
@@ -59,8 +59,8 @@ same scoped command; changing `--user`/`--domain` mid-archive requires a new arc
 directory (export) or a copied archive with a fresh `state.sqlite3` (import).
 
 After the export process has stopped, manually transfer the entire `export_data`
-directory to the destination. Preserve permissions and hidden files such as
-`export_data/.keycheck` and `export_data/.manifest.zmenc`. For example, with removable
+directory to the destination. Preserve permissions and files such as
+`export_data/manifest.json`. For example, with removable
 or mounted storage:
 
 ```bash
@@ -86,12 +86,11 @@ Then run:
 /path/to/zimigratex/import.sh
 ```
 
-The command asks for the same passphrase and performs a complete validation before any
-destination change. It authenticates and decrypts every record, checks encrypted and
-plaintext SHA-256 values, scans every ZIP/TGZ mailbox archive, and verifies manifest
-counts. Only after all checks pass does it run destination command preflight and begin the
-local import. A validation failure exits without constructing the importer or changing
-the destination.
+The command performs a complete validation before any
+destination change. It reads every record, checks SHA-256 values, scans every ZIP/TGZ
+mailbox archive, and verifies manifest counts. Only after all checks pass does it run
+destination command preflight and begin the local import. A validation failure exits
+without constructing the importer or changing the destination.
 
 After validation, import displays the archive categories for selection. Global and server
 settings require their explicit allowlists. Before any target mutation, current
@@ -138,13 +137,14 @@ IDs, ports, and LDAP/MTA settings that are unsafe to copy blindly.
 
 Zimbra stores four data-source credential fields encoded against the source
 `zimbraDataSourceId`. Export decodes those fields using Zimbra's long-standing
-LDAP encoding only inside the process, immediately places the plaintext in the AES-GCM archive,
+LDAP encoding only inside the process, writes the plaintext into the archive,
 and lets the destination encrypt it against its newly generated data-source ID. Copying
 the LDAP ciphertext directly would create unusable credentials.
 
 ## Requirements
 
-- Python 3.11 or newer and the Python `cryptography` package;
+- Python 3.11 or newer and the Python `rich` package;
+- a 64-bit x86_64 glibc Linux host that Zimbra FOSS supports (RHEL 7–9, Ubuntu 18.04–24.04 LTS, Oracle Linux, Rocky Linux);
 - `zimigrate` installed on both the source and destination servers;
 - `/opt/zimbra/bin/zmprov`, `zmmailbox`, `zmcontrol`, and `zmhostname` locally available;
 - execution as the `zimbra` user, or local `sudo -n -u zimbra` permission;
@@ -165,10 +165,10 @@ invalidate the runtime stamp and trigger a package reinstall, preventing an old 
 from silently running stale migration code. Extra arguments are passed through, for
 example `./export.sh --archive /srv/migration/export_data`.
 
-Copy `vendor/` with the repository. The wrappers extract the matching standalone
-CPython archive from `vendor/python/`, install `cryptography` and `rich` from
-`vendor/wheels/` without contacting PyPI, and use `vendor/certs/cacert.pem` when a
-download is still required. Refresh those files on a machine with internet access:
+Copy `vendor/` with the repository. The wrappers extract the vendored x86_64 glibc
+CPython archive from `vendor/python/`, install `rich` from `vendor/wheels/` without
+contacting PyPI, and use `vendor/certs/cacert.pem` when a download is still required.
+Refresh those files on a machine with internet access:
 
 ```bash
 ./scripts/vendor-runtime.sh
@@ -181,7 +181,7 @@ mail host's TLS trust store cannot verify GitHub, the download retries after ins
 CA certificates and, as a last resort, without TLS verification; the pinned SHA-256
 digest still rejects a substituted archive. If a
 virtualenv still cannot be created, they run `zimigrate` from the repository `src/`
-tree after installing `cryptography` and `rich` next to `.runtime/`.
+tree after installing `rich` next to `.runtime/`.
 
 Manual install remains available:
 
@@ -203,24 +203,6 @@ commands always execute against the local Zimbra installation. Multi-mailbox sou
 content may still be routed by Zimbra to an account's `zimbraMailHost` over its admin
 REST port; this is not SSH command execution.
 
-## Archive passphrase
-
-Interactive runs prompt for the passphrase. A new export asks twice; resume and import
-ask once. The passphrase must contain at least 16 characters and is never written to the
-archive or configuration.
-
-For non-interactive operation, set it in the process environment:
-
-```bash
-read -rs ZIMIGRATE_ARCHIVE_PASSPHRASE
-export ZIMIGRATE_ARCHIVE_PASSPHRASE
-zimigrate export
-unset ZIMIGRATE_ARCHIVE_PASSPHRASE
-```
-
-`zimigrate` removes that variable from its own environment before it starts Zimbra
-child processes.
-
 ## Status and standalone validation
 
 All commands use `./export_data` by default:
@@ -231,13 +213,13 @@ zimigrate verify --deep
 zimigrate verify-target
 ```
 
-`status` does not require the archive passphrase. `verify --deep` performs the same
-archive-level data validation that import always performs automatically.
+`verify --deep` performs the same archive-level data validation that import always
+performs automatically.
 
 ## Optional advanced configuration
 
 The no-argument workflow uses safe defaults: all normal accounts are selected, mailbox
-content and visible secret hashes are included, four bounded workers are used, existing
+content and visible secret hashes are included, eight bounded workers are used, existing
 objects are merged, and mailbox conflicts are skipped. Use
 [config.example.toml](config.example.toml) only when those policies must change:
 
@@ -278,21 +260,16 @@ they cannot silently change during a resume.
 
 ## Reliability and security
 
-The archive uses AES-256-GCM, scrypt key derivation, authenticated records and manifest,
-SHA-256, atomic writes, `0600` files, a `0700` directory, and SQLite checkpoints. The
-readable `manifest.json` is informational; encrypted archives use `.manifest.zmenc` as
-the authoritative manifest. Worker submission and execution are bounded, and only
-classified transient command failures use limited exponential retries. Plaintext mailbox
-chunks exist only under `export_data/.tmp` while being processed and are removed
-afterward. Sensitive `zmprov` values use stdin batch input instead of process arguments.
-
-Encrypted archives produced by an older build without `.manifest.zmenc` must be resumed
-once on the source with the current version before import. This authenticates the final
-inventory and prevents a modified plaintext manifest from hiding deleted records.
+The archive uses SHA-256 checksums, atomic writes, `0600` files, a `0700` directory,
+and SQLite checkpoints. Records and mailbox payloads are stored in plaintext. Worker
+submission and execution are bounded, and only classified transient command failures use
+limited exponential retries. Temporary mailbox chunks exist only under `export_data/.tmp`
+while being processed and are removed afterward. Sensitive `zmprov` values use stdin
+batch input instead of process arguments.
 
 Do not copy an archive while `zimigrate` is running. Keep the directory on trusted,
-preferably disk-encrypted storage. A copied archive contains account names and
-checkpoint metadata even though provisioning records and mailbox payloads are encrypted.
+preferably disk-encrypted storage. A copied archive contains account names, password
+hashes when secret export is enabled, mailbox content, and checkpoint metadata.
 See [SECURITY.md](SECURITY.md) for details.
 
 ## Known boundaries

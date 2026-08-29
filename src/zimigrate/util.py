@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import tempfile
 from collections.abc import Iterator
 from datetime import UTC, datetime
@@ -12,6 +13,8 @@ from pathlib import Path
 from typing import Any, BinaryIO
 
 from zimigrate.errors import ArchiveError
+
+HASH_IO_SIZE = 8 * 1024 * 1024
 
 
 def utc_now() -> str:
@@ -21,7 +24,10 @@ def utc_now() -> str:
 def sha256_file(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as stream:
-        for block in iter(lambda: stream.read(1024 * 1024), b""):
+        while True:
+            block = stream.read(HASH_IO_SIZE)
+            if not block:
+                break
             digest.update(block)
     return digest.hexdigest()
 
@@ -41,7 +47,7 @@ def ensure_relative_path(root: Path, relative: str) -> Path:
 
 
 @contextlib.contextmanager
-def atomic_output(path: Path, mode: str = "wb") -> Iterator[BinaryIO]:
+def atomic_output(path: Path, mode: str = "wb", *, durable: bool = True) -> Iterator[BinaryIO]:
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     descriptor, temporary_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
     temporary_path = Path(temporary_name)
@@ -50,12 +56,29 @@ def atomic_output(path: Path, mode: str = "wb") -> Iterator[BinaryIO]:
         with os.fdopen(descriptor, mode) as stream:
             yield stream
             stream.flush()
-            os.fsync(stream.fileno())
+            if durable:
+                os.fsync(stream.fileno())
         os.replace(temporary_path, path)
-        _fsync_directory(path.parent)
+        if durable:
+            _fsync_directory(path.parent)
     except BaseException:
         temporary_path.unlink(missing_ok=True)
         raise
+
+
+def place_file(source: Path, destination: Path) -> tuple[str, int]:
+    """Install source at destination. Same-filesystem sources are renamed after hashing."""
+    destination.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    digest = sha256_file(source)
+    os.chmod(source, 0o600)
+    _fsync_file(source)
+    if _same_filesystem(source, destination.parent):
+        os.replace(source, destination)
+        _fsync_directory(destination.parent)
+        return digest, destination.stat().st_size
+    with source.open("rb") as input_stream, atomic_output(destination, "wb") as output:
+        shutil.copyfileobj(input_stream, output, HASH_IO_SIZE)
+    return digest, destination.stat().st_size
 
 
 def atomic_json(path: Path, value: dict[str, Any]) -> None:
@@ -79,6 +102,21 @@ def open_private_temporary(directory: Path, suffix: str = "") -> tuple[int, Path
     descriptor, name = tempfile.mkstemp(prefix=".zimigrate-", suffix=suffix, dir=directory)
     os.chmod(name, 0o600)
     return descriptor, Path(name)
+
+
+def _fsync_file(path: Path) -> None:
+    descriptor = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _same_filesystem(source: Path, directory: Path) -> bool:
+    try:
+        return source.stat().st_dev == directory.stat().st_dev
+    except OSError:
+        return False
 
 
 def _fsync_directory(directory: Path) -> None:

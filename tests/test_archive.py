@@ -1,12 +1,10 @@
 from __future__ import annotations
 
 import io
-import os
 import tarfile
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
 
 from zimigrate.archive import MigrationArchive, validate_mailbox_archive
 from zimigrate.config import ArchiveConfig
@@ -17,14 +15,10 @@ from zimigrate.verifier import verify_archive
 
 
 class ArchiveTests(unittest.TestCase):
-    def test_encrypted_entity_and_mailbox_roundtrip(self) -> None:
-        with (
-            tempfile.TemporaryDirectory() as directory,
-            patch.dict(os.environ, {"TEST_ARCHIVE_KEY": "correct horse battery staple"}),
-        ):
+    def test_entity_and_mailbox_roundtrip(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
             root = Path(directory) / "archive"
-            config = ArchiveConfig(passphrase_env="TEST_ARCHIVE_KEY")
-            archive = MigrationArchive(root, config, create=True)
+            archive = MigrationArchive(root, ArchiveConfig(), create=True)
             record = EntityRecord(
                 kind="account",
                 name="user@example.com",
@@ -32,8 +26,8 @@ class ArchiveTests(unittest.TestCase):
             )
 
             relative, _ = archive.write_entity(record)
-            encrypted_payload = (root / relative).read_bytes()
-            self.assertNotIn(b"sensitive", encrypted_payload)
+            stored = (root / relative).read_bytes()
+            self.assertIn(b"sensitive", stored)
             self.assertEqual(
                 archive.read_entity("account", "user@example.com").attributes,
                 record.attributes,
@@ -44,6 +38,8 @@ class ArchiveTests(unittest.TestCase):
             _write_tgz(plaintext)
             mailbox_relative = archive.mailbox_relative_path("user@example.com", "full")
             checksum, plaintext_checksum, _ = archive.store_mailbox(plaintext, mailbox_relative)
+            self.assertEqual(checksum, plaintext_checksum)
+            self.assertFalse(plaintext.exists())
             archive.validate_mailbox_artifact(
                 mailbox_relative,
                 checksum,
@@ -51,6 +47,7 @@ class ArchiveTests(unittest.TestCase):
                 expected_plaintext_checksum=plaintext_checksum,
             )
             with archive.materialize_mailbox(mailbox_relative) as materialized:
+                self.assertEqual(materialized, root / mailbox_relative)
                 self.assertEqual(sha256_file(materialized), plaintext_checksum)
                 validate_mailbox_archive(materialized, "tgz")
 
@@ -74,49 +71,24 @@ class ArchiveTests(unittest.TestCase):
             ]
             archive.write_entity(record)
             archive.write_manifest("Release 8.8.15.GA FOSS", completed=True)
-            public_manifest = root / "manifest.json"
-            public_manifest.write_text(
-                public_manifest.read_text(encoding="utf-8").replace(
-                    '"completed": true', '"completed": false'
-                ),
-                encoding="utf-8",
-            )
-            self.assertTrue(archive.manifest()["completed"])
+            self.assertFalse(archive.manifest()["encrypted"])
             self.assertEqual(
                 verify_archive(archive, deep=True, workers=2)["mailbox_artifact"],
                 1,
             )
 
-            orphan = root / "mailboxes" / "orphan.tgz.zmenc"
+            orphan = root / "mailboxes" / "orphan.tgz"
             orphan.write_bytes(b"unreferenced")
             with self.assertRaises(ArchiveError):
                 verify_archive(archive, deep=True, workers=2)
 
-    def test_authenticated_manifest_is_required_for_encrypted_import(self) -> None:
-        with (
-            tempfile.TemporaryDirectory() as directory,
-            patch.dict(os.environ, {"TEST_ARCHIVE_KEY": "correct horse battery staple"}),
-        ):
-            root = Path(directory) / "archive"
-            config = ArchiveConfig(passphrase_env="TEST_ARCHIVE_KEY")
-            archive = MigrationArchive(root, config, create=True)
-            archive.write_manifest("Release 8.8.15.GA FOSS", completed=True)
-            (root / ".manifest.zmenc").unlink()
-
-            with self.assertRaises(ArchiveError):
-                MigrationArchive(root, config, create=False)
-
-    def test_wrong_passphrase_is_rejected_before_archive_use(self) -> None:
+    def test_legacy_encrypted_archive_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory) / "archive"
-            config = ArchiveConfig(passphrase_env="TEST_ARCHIVE_KEY")
-            with patch.dict(os.environ, {"TEST_ARCHIVE_KEY": "correct horse battery staple"}):
-                MigrationArchive(root, config, create=True)
-            with (
-                patch.dict(os.environ, {"TEST_ARCHIVE_KEY": "wrong passphrase value"}),
-                self.assertRaises(ArchiveError),
-            ):
-                MigrationArchive(root, config, create=False)
+            MigrationArchive(root, ArchiveConfig(), create=True)
+            (root / ".manifest.zmenc").write_bytes(b"legacy")
+            with self.assertRaises(ArchiveError):
+                MigrationArchive(root, ArchiveConfig(), create=False)
 
     def test_mailbox_archive_rejects_link_entries(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

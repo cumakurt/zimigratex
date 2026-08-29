@@ -1,12 +1,10 @@
 from __future__ import annotations
 
-import os
 import tempfile
 import unittest
 import zipfile
 from dataclasses import replace
 from pathlib import Path
-from unittest.mock import patch
 
 from zimigrate.archive import MigrationArchive
 from zimigrate.config import (
@@ -24,11 +22,8 @@ from zimigrate.target_verifier import TargetVerifier
 
 
 class WorkflowTests(unittest.TestCase):
-    def test_minimal_encrypted_export_import_and_resume(self) -> None:
-        with (
-            tempfile.TemporaryDirectory() as directory,
-            patch.dict(os.environ, {"WORKFLOW_ARCHIVE_KEY": "workflow archive passphrase"}),
-        ):
+    def test_minimal_export_import_and_resume(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
             config = _config()
             archive = MigrationArchive(Path(directory) / "archive", config.archive, create=True)
             exporter = Exporter(config, archive)
@@ -72,10 +67,7 @@ class WorkflowTests(unittest.TestCase):
                 mismatched_verification.run()
 
     def test_account_metadata_failure_keeps_export_incomplete(self) -> None:
-        with (
-            tempfile.TemporaryDirectory() as directory,
-            patch.dict(os.environ, {"WORKFLOW_ARCHIVE_KEY": "workflow archive passphrase"}),
-        ):
+        with tempfile.TemporaryDirectory() as directory:
             config = _config()
             archive = MigrationArchive(Path(directory) / "archive", config.archive, create=True)
             source = FakeSource()
@@ -95,10 +87,7 @@ class WorkflowTests(unittest.TestCase):
             self.assertEqual(state.status, "failed")
 
     def test_reset_resolution_only_resets_the_first_mailbox_chunk(self) -> None:
-        with (
-            tempfile.TemporaryDirectory() as directory,
-            patch.dict(os.environ, {"WORKFLOW_ARCHIVE_KEY": "workflow archive passphrase"}),
-        ):
+        with tempfile.TemporaryDirectory() as directory:
             base = _config()
             config = replace(
                 base,
@@ -128,10 +117,7 @@ class WorkflowTests(unittest.TestCase):
             self.assertTrue(all(value == "skip" for value in target.mailbox_resolutions[1:]))
 
     def test_user_scope_exports_one_account_and_import_can_select_from_full_archive(self) -> None:
-        with (
-            tempfile.TemporaryDirectory() as directory,
-            patch.dict(os.environ, {"WORKFLOW_ARCHIVE_KEY": "workflow archive passphrase"}),
-        ):
+        with tempfile.TemporaryDirectory() as directory:
             source = _TwoAccountSource()
             config = _config()
             archive = MigrationArchive(Path(directory) / "full", config.archive, create=True)
@@ -404,7 +390,7 @@ def _config() -> AppConfig:
     return AppConfig(
         source=EndpointConfig(),
         target=EndpointConfig(),
-        archive=ArchiveConfig(passphrase_env="WORKFLOW_ARCHIVE_KEY"),
+        archive=ArchiveConfig(),
         transfer=TransferConfig(workers=2),
         import_options=ImportConfig(),
     )

@@ -26,7 +26,7 @@ def verify_archive(archive: MigrationArchive, *, deep: bool, workers: int = 1) -
     manifest = archive.manifest()
     if not manifest.get("completed"):
         raise ArchiveError("Archive manifest reports an incomplete export")
-    _validate_manifest(manifest, encrypted=archive.crypto is not None)
+    _validate_manifest(manifest)
     counts: dict[str, int] = {}
     artifacts: list[Artifact] = []
     entity_names: set[tuple[str, str]] = set()
@@ -54,9 +54,9 @@ def verify_archive(archive: MigrationArchive, *, deep: bool, workers: int = 1) -
                         raise ArchiveError(
                             f"Mailbox artifact path does not match its identity: {artifact.path}"
                         )
-                    if artifact.encrypted != (archive.crypto is not None):
+                    if artifact.encrypted:
                         raise ArchiveError(
-                            f"Mailbox artifact encryption marker is inconsistent: {artifact.path}"
+                            f"Encrypted mailbox artifacts are not supported: {artifact.path}"
                         )
             artifacts.extend(record.artifacts)
     if artifacts:
@@ -120,11 +120,11 @@ def _verify_artifact(archive: MigrationArchive, artifact: Artifact, deep: bool) 
     )
 
 
-def _validate_manifest(manifest: dict[str, object], *, encrypted: bool) -> None:
+def _validate_manifest(manifest: dict[str, object]) -> None:
     if manifest.get("completed") is not True:
         raise ArchiveError("Archive manifest completion marker is invalid")
-    if manifest.get("encrypted") is not encrypted:
-        raise ArchiveError("Archive manifest encryption marker is inconsistent")
+    if manifest.get("encrypted") is not False:
+        raise ArchiveError("Encrypted archives are not supported")
     if not isinstance(manifest.get("source_version"), str):
         raise ArchiveError("Archive manifest source version is invalid")
     for field in ("archive_id", "created_at", "updated_at"):

@@ -32,7 +32,7 @@ from zimigrate.scope import (
     scope_from_transfer,
 )
 from zimigrate.state import StateRecord
-from zimigrate.util import atomic_json, ensure_relative_path, sha256_file, utc_now
+from zimigrate.util import atomic_json, ensure_relative_path, utc_now
 from zimigrate.zimbra import ZimbraClient
 
 LOGGER = logging.getLogger(__name__)
@@ -530,23 +530,20 @@ class Importer:
                         "account", f"{record.name} ({artifact.label})", action="import"
                     ),
                 )
-                with self.archive.materialize_mailbox(artifact.path) as plaintext:
-                    if sha256_file(plaintext) != artifact.plaintext_sha256:
-                        raise ZimigrateError(
-                            f"Plaintext mailbox checksum mismatch: {artifact.path}"
-                        )
-                    resolution = (
-                        "skip"
-                        if configured_resolution == "reset" and index > 0
-                        else configured_resolution
-                    )
-                    self.client.import_mailbox(
-                        record.name,
-                        plaintext,
-                        resolution,
-                        mailbox_host,
-                        artifact.archive_format,
-                    )
+                if artifact.plaintext_sha256 != artifact.sha256:
+                    raise ZimigrateError(f"Plaintext mailbox checksum mismatch: {artifact.path}")
+                resolution = (
+                    "skip"
+                    if configured_resolution == "reset" and index > 0
+                    else configured_resolution
+                )
+                self.client.import_mailbox(
+                    record.name,
+                    ensure_relative_path(self.archive.root, artifact.path),
+                    resolution,
+                    mailbox_host,
+                    artifact.archive_format,
+                )
                 self.archive.state.succeed(
                     phase,
                     entity,

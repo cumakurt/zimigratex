@@ -286,7 +286,7 @@ class DashboardHandler(logging.Handler):
                 self.renderable,
                 console=self.console,
                 auto_refresh=True,
-                refresh_per_second=8,
+                refresh_per_second=4,
                 transient=False,
                 redirect_stdout=False,
                 redirect_stderr=False,
