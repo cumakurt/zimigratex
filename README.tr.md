@@ -47,17 +47,17 @@ bir domain ve ona bağlı nesnelerle sınırlar. Kapsamlı çalışmada kategori
 atlanır; global ve sunucu ayarları kopyalanmaz.
 
 ```bash
-./export.sh --user deneme@deneme.com
-./export.sh --domain deneme.com
-./export.sh --archive ./backup_deneme --domain deneme.com
+./export.sh --user user@example.com
+./export.sh --domain example.com
+./export.sh --archive ./backup_example --domain example.com
 ```
 
 Import, **tam** bir arşive aynı süzgeci uygulayabilir; her şeyi bir kez export edip
 sonra tek bir mailbox'ı geri yükleyebilirsiniz:
 
 ```bash
-./import.sh --user deneme@deneme.com
-./import.sh --domain deneme.com
+./import.sh --user user@example.com
+./import.sh --domain example.com
 ```
 
 `--user` o hesabı, domainini, COS'unu ve mailbox'ını geri yükler. `--domain` ayrıca

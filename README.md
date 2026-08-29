@@ -40,17 +40,17 @@ or one domain and the objects it needs. A scoped run skips the category prompt a
 does not copy global or per-server configuration.
 
 ```bash
-./export.sh --user deneme@deneme.com
-./export.sh --domain deneme.com
-./export.sh --archive ./backup_deneme --domain deneme.com
+./export.sh --user user@example.com
+./export.sh --domain example.com
+./export.sh --archive ./backup_example --domain example.com
 ```
 
 Import can apply the same filter to a **full** archive, so you can export everything
 once and restore a single mailbox later:
 
 ```bash
-./import.sh --user deneme@deneme.com
-./import.sh --domain deneme.com
+./import.sh --user user@example.com
+./import.sh --domain example.com
 ```
 
 `--user` restores that account, its domain, its COS, and its mailbox. `--domain`
