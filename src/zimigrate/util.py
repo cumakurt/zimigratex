@@ -9,6 +9,7 @@ import shutil
 import tempfile
 from collections.abc import Iterator
 from datetime import UTC, datetime
+from ipaddress import ip_address
 from pathlib import Path
 from typing import Any, BinaryIO
 
@@ -47,6 +48,17 @@ def is_valid_dns_name(value: str) -> bool:
         and not value.endswith(".")
         and all(DNS_LABEL.fullmatch(label) for label in value.split("."))
     )
+
+
+def is_valid_ssh_target(value: str) -> bool:
+    """Return whether value is a DNS name or IP address usable as an SSH destination."""
+    if not value or len(value) > 253 or "\x00" in value or any(ch.isspace() for ch in value):
+        return False
+    try:
+        ip_address(value)
+        return True
+    except ValueError:
+        return is_valid_dns_name(value)
 
 
 def ensure_relative_path(root: Path, relative: str) -> Path:

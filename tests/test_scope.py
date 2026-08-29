@@ -70,15 +70,13 @@ class TargetScopeTests(unittest.TestCase):
             ["user@example.com"],
         )
         self.assertTrue(transfer.include_accounts)
-        self.assertFalse(transfer.include_global_config)
         self.assertTrue(transfer.include_distribution_lists)
 
-    def test_user_scope_omits_distribution_lists_and_global_config(self) -> None:
+    def test_user_scope_omits_distribution_lists(self) -> None:
         transfer = apply_scope_to_transfer(
             TransferConfig(), parse_target_scope(["u@example.com"], [])
         )
         self.assertFalse(transfer.include_distribution_lists)
-        self.assertFalse(transfer.include_server_config)
         self.assertEqual(
             selected_names(
                 ["u@example.com", "v@example.com"],

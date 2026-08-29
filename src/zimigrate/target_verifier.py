@@ -52,7 +52,6 @@ class TargetVerifier:
             raise ZimigrateError("The export is incomplete; target verification cannot run")
         self._import_binding = _bound_import_options(self.archive)
         selected = _imported_categories(self._import_binding)
-        options = self.config.import_options
         verification_transfer = replace(
             self.config.transfer,
             **{
@@ -65,22 +64,6 @@ class TargetVerifier:
                     "include_distribution_lists",
                 )
             },
-            include_global_config=(
-                selected["include_global_config"]
-                and _boolean_option(
-                    self._import_binding,
-                    "apply_global_config",
-                    options.apply_global_config,
-                )
-            ),
-            include_server_config=(
-                selected["include_server_config"]
-                and _boolean_option(
-                    self._import_binding,
-                    "apply_server_config",
-                    options.apply_server_config,
-                )
-            ),
         )
         version = self.client.preflight(
             required_provisioning_commands=required_verification_commands(verification_transfer)
@@ -230,8 +213,6 @@ class TargetVerifier:
                         f"{len(missing)} distribution member(s) are missing",
                     )
 
-        self._verify_optional_configuration(selected)
-
         report = {
             "checked": self.checked,
             "skipped_existing": self.skipped,
@@ -250,92 +231,6 @@ class TargetVerifier:
             "skipped_existing": self.skipped,
             "mismatches": 0,
         }
-
-    def _verify_optional_configuration(self, selected: dict[str, bool]) -> None:
-        options = self.config.import_options
-        apply_global = _boolean_option(
-            self._import_binding,
-            "apply_global_config",
-            options.apply_global_config,
-        )
-        if selected["include_global_config"] and apply_global:
-            records = list(self.archive.iter_entities("global_config"))
-            if records:
-                record = records[0]
-                self.checked += 1
-                if not self.archive.state.is_success("import:global-config", "global"):
-                    self._mismatch(record, "checkpoint", "global configuration was not imported")
-                else:
-                    allowlist = _string_tuple_option(
-                        self._import_binding,
-                        "global_attribute_allowlist",
-                        options.global_attribute_allowlist,
-                    )
-                    expected = mutable_attributes(
-                        "global_config",
-                        record.attributes,
-                        allowlist=allowlist,
-                        allow_sensitive=_boolean_option(
-                            self._import_binding,
-                            "allow_sensitive_config",
-                            options.allow_sensitive_config,
-                        ),
-                    )
-                    self._compare_attributes(
-                        record,
-                        expected,
-                        self.client.get_global_config(),
-                        {},
-                        field_prefix="attribute",
-                    )
-
-        apply_server = _boolean_option(
-            self._import_binding,
-            "apply_server_config",
-            options.apply_server_config,
-        )
-        if not selected["include_server_config"] or not apply_server:
-            return
-        server_map = _string_mapping_option(
-            self._import_binding,
-            "server_map",
-            options.server_map,
-        )
-        allowlist = _string_tuple_option(
-            self._import_binding,
-            "server_attribute_allowlist",
-            options.server_attribute_allowlist,
-        )
-        allow_sensitive = _boolean_option(
-            self._import_binding,
-            "allow_sensitive_config",
-            options.allow_sensitive_config,
-        )
-        for record in self.archive.iter_entities("server"):
-            destination_name = server_map.get(record.name)
-            if not destination_name:
-                continue
-            self.checked += 1
-            if not self.archive.state.is_success("import:server-config", record.name):
-                self._mismatch(record, "checkpoint", "server configuration was not imported")
-                continue
-            target = self.client.get_optional("server", destination_name)
-            if target is None:
-                self._mismatch(record, "existence", "mapped destination server does not exist")
-                continue
-            expected = mutable_attributes(
-                "server",
-                record.attributes,
-                allowlist=allowlist,
-                allow_sensitive=allow_sensitive,
-            )
-            self._compare_attributes(
-                record,
-                expected,
-                target,
-                {},
-                field_prefix="attribute",
-            )
 
     def _verify_existence(self, record: EntityRecord) -> Attributes | None:
         self.checked += 1
@@ -571,8 +466,6 @@ def _imported_categories(options: dict[str, object]) -> dict[str, bool]:
             "include_accounts",
             "include_mailboxes",
             "include_distribution_lists",
-            "include_global_config",
-            "include_server_config",
         )
     }
 
@@ -595,17 +488,6 @@ def _string_mapping_option(
     ):
         raise ZimigrateError(f"Import configuration option is invalid: {name}")
     return dict(value)
-
-
-def _string_tuple_option(
-    options: dict[str, object],
-    name: str,
-    fallback: tuple[str, ...],
-) -> tuple[str, ...]:
-    value = options.get(name, fallback)
-    if not isinstance(value, (list, tuple)) or any(not isinstance(item, str) for item in value):
-        raise ZimigrateError(f"Import configuration option is invalid: {name}")
-    return tuple(value)
 
 
 def _optional_string_option(

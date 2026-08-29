@@ -62,12 +62,8 @@ def required_export_commands(transfer: TransferConfig) -> set[str]:
         commands.update({"gacr", "gaa", "ga", "gcr", "gid", "gsig", "gds"})
     if transfer.include_distribution_lists:
         commands.update({"gadl", "gdl", "gdlm"})
-    if transfer.include_global_config:
-        commands.add("gacf")
-    if transfer.include_server_config or transfer.include_mailboxes:
-        commands.update({"gas", "gs"})
     if transfer.include_mailboxes:
-        commands.add("gqu")
+        commands.update({"gas", "gs", "gqu"})
     return commands
 
 
@@ -97,14 +93,11 @@ def required_import_commands(transfer: TransferConfig) -> set[str]:
                 "cds",
                 "mds",
                 "fc",
+                "gs",
             }
         )
     if transfer.include_distribution_lists:
         commands.update({"gdl", "cdl", "cddl", "mdl", "adla", "gdlm", "adlm"})
-    if transfer.include_global_config:
-        commands.add("mcf")
-    if transfer.include_server_config:
-        commands.update({"gs", "ms"})
     return commands
 
 
@@ -118,10 +111,6 @@ def required_verification_commands(transfer: TransferConfig) -> set[str]:
         commands.update({"ga", "gcr", "gid", "gsig", "gds"})
     if transfer.include_distribution_lists:
         commands.update({"gdl", "gdlm"})
-    if transfer.include_global_config:
-        commands.add("gacf")
-    if transfer.include_server_config:
-        commands.add("gs")
     return commands
 
 
@@ -391,10 +380,6 @@ class ZimbraClient:
     def get_server(self, name: str) -> Attributes:
         return self._get("gs", name, ldap=True, sensitive=True)
 
-    def get_global_config(self) -> Attributes:
-        result = self._zmprov("gacf", ldap=True, retryable=True, sensitive=True)
-        return parse_attributes(result)
-
     def get_quota_usage(self, server: str) -> dict[str, int]:
         return parse_quota_usage(self._zmprov("gqu", server, retryable=True))
 
@@ -536,28 +521,16 @@ class ZimbraClient:
             "calendar_resource": "mcr",
             "distribution_list": "mdl",
             "dynamic_distribution_list": "mdl",
-            "global_config": "mcf",
-            "server": "ms",
         }[kind]
-        if kind == "global_config":
-            self._zmprov(
-                command,
-                *operations,
-                ldap=True,
-                retryable=True,
-                sensitive=sensitive,
-                protect_arguments=True,
-            )
-        else:
-            self._zmprov(
-                command,
-                name,
-                *operations,
-                ldap=True,
-                retryable=True,
-                sensitive=sensitive,
-                protect_arguments=True,
-            )
+        self._zmprov(
+            command,
+            name,
+            *operations,
+            ldap=True,
+            retryable=True,
+            sensitive=sensitive,
+            protect_arguments=True,
+        )
 
     def add_account_alias(self, account: str, alias: str) -> None:
         self._add_idempotent("aaa", account, alias)

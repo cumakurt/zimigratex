@@ -42,8 +42,6 @@ class TransferConfig:
     include_accounts: bool = True
     include_mailboxes: bool = True
     include_distribution_lists: bool = True
-    include_global_config: bool = True
-    include_server_config: bool = True
     include_system_mailboxes: bool = False
     include_secrets: bool = True
     account_include: tuple[str, ...] = ("*",)
@@ -82,15 +80,9 @@ class ImportConfig:
     existing_policy: str = "merge"
     mailbox_conflict_resolution: str = "skip"
     strict_attributes: bool = True
-    apply_global_config: bool = False
-    global_attribute_allowlist: tuple[str, ...] = ()
-    apply_server_config: bool = False
-    server_attribute_allowlist: tuple[str, ...] = ()
-    server_map: dict[str, str] = field(default_factory=dict)
     mailhost_map: dict[str, str] = field(default_factory=dict)
     default_mailhost: str | None = None
     import_system_accounts: bool = False
-    allow_sensitive_config: bool = False
     allow_unverified_remote_capacity: bool = False
 
     def allows_version(self, version: str) -> bool:
@@ -110,19 +102,9 @@ class ImportConfig:
             raise ConfigurationError(
                 "import.mailbox_conflict_resolution must be skip, modify, replace, or reset"
             )
-        if self.apply_global_config and not self.global_attribute_allowlist:
-            raise ConfigurationError(
-                "import.global_attribute_allowlist is required when global config import is enabled"
-            )
-        if self.apply_server_config and not self.server_attribute_allowlist:
-            raise ConfigurationError(
-                "import.server_attribute_allowlist is required when server config import is enabled"
-            )
         mailhosts = [
             *self.mailhost_map.keys(),
             *self.mailhost_map.values(),
-            *self.server_map.keys(),
-            *self.server_map.values(),
         ]
         if self.default_mailhost:
             mailhosts.append(self.default_mailhost)
@@ -204,6 +186,15 @@ def _endpoint(raw: dict[str, Any], label: str) -> EndpointConfig:
 
 
 REMOVED_ARCHIVE_KEYS = {"encryption_enabled", "passphrase_env", "allow_unencrypted"}
+REMOVED_TRANSFER_KEYS = {"include_global_config", "include_server_config"}
+REMOVED_IMPORT_KEYS = {
+    "apply_global_config",
+    "global_attribute_allowlist",
+    "apply_server_config",
+    "server_attribute_allowlist",
+    "server_map",
+    "allow_sensitive_config",
+}
 
 
 def _validate_archive_table(raw: dict[str, Any]) -> None:
@@ -216,6 +207,7 @@ def _validate_archive_table(raw: dict[str, Any]) -> None:
 
 
 def _transfer(raw: dict[str, Any]) -> TransferConfig:
+    _reject_removed(raw, REMOVED_TRANSFER_KEYS, "transfer")
     allowed = {
         "workers",
         "retries",
@@ -225,8 +217,6 @@ def _transfer(raw: dict[str, Any]) -> TransferConfig:
         "include_accounts",
         "include_mailboxes",
         "include_distribution_lists",
-        "include_global_config",
-        "include_server_config",
         "include_system_mailboxes",
         "include_secrets",
         "account_include",
@@ -249,8 +239,6 @@ def _transfer(raw: dict[str, Any]) -> TransferConfig:
         include_accounts=_boolean(raw, "include_accounts", True, "transfer"),
         include_mailboxes=_boolean(raw, "include_mailboxes", True, "transfer"),
         include_distribution_lists=_boolean(raw, "include_distribution_lists", True, "transfer"),
-        include_global_config=_boolean(raw, "include_global_config", True, "transfer"),
-        include_server_config=_boolean(raw, "include_server_config", True, "transfer"),
         include_system_mailboxes=_boolean(raw, "include_system_mailboxes", False, "transfer"),
         include_secrets=_boolean(raw, "include_secrets", True, "transfer"),
         account_include=_string_tuple(raw, "account_include", ("*",), "transfer"),
@@ -266,26 +254,18 @@ def _transfer(raw: dict[str, Any]) -> TransferConfig:
 
 
 def _import(raw: dict[str, Any]) -> ImportConfig:
+    _reject_removed(raw, REMOVED_IMPORT_KEYS, "import")
     allowed = {
         "expected_target_version_pattern",
         "existing_policy",
         "mailbox_conflict_resolution",
         "strict_attributes",
-        "apply_global_config",
-        "global_attribute_allowlist",
-        "apply_server_config",
-        "server_attribute_allowlist",
-        "server_map",
         "mailhost_map",
         "default_mailhost",
         "import_system_accounts",
-        "allow_sensitive_config",
         "allow_unverified_remote_capacity",
     }
     _reject_unknown(raw, allowed, "import")
-    server_map = raw.get("server_map", {})
-    if not isinstance(server_map, dict):
-        raise ConfigurationError("import.server_map must be a TOML table")
     mailhost_map = raw.get("mailhost_map", {})
     if not isinstance(mailhost_map, dict):
         raise ConfigurationError("import.mailhost_map must be a TOML table")
@@ -299,15 +279,9 @@ def _import(raw: dict[str, Any]) -> ImportConfig:
         existing_policy=_string(raw, "existing_policy", "merge", "import"),
         mailbox_conflict_resolution=_string(raw, "mailbox_conflict_resolution", "skip", "import"),
         strict_attributes=_boolean(raw, "strict_attributes", True, "import"),
-        apply_global_config=_boolean(raw, "apply_global_config", False, "import"),
-        global_attribute_allowlist=_string_tuple(raw, "global_attribute_allowlist", (), "import"),
-        apply_server_config=_boolean(raw, "apply_server_config", False, "import"),
-        server_attribute_allowlist=_string_tuple(raw, "server_attribute_allowlist", (), "import"),
-        server_map=_string_mapping(server_map, "import.server_map"),
         mailhost_map=_string_mapping(mailhost_map, "import.mailhost_map"),
         default_mailhost=_optional_string(raw.get("default_mailhost"), "import.default_mailhost"),
         import_system_accounts=_boolean(raw, "import_system_accounts", False, "import"),
-        allow_sensitive_config=_boolean(raw, "allow_sensitive_config", False, "import"),
         allow_unverified_remote_capacity=_boolean(
             raw,
             "allow_unverified_remote_capacity",
@@ -327,6 +301,14 @@ def _table(raw: dict[str, Any], name: str) -> dict[str, Any]:
 def _reject_unknown(raw: dict[str, Any], allowed: set[str], label: str) -> None:
     if unknown := sorted(set(raw).difference(allowed)):
         raise ConfigurationError(f"Unknown {label} configuration key: {unknown[0]}")
+
+
+def _reject_removed(raw: dict[str, Any], removed: set[str], label: str) -> None:
+    if found := sorted(removed.intersection(raw)):
+        raise ConfigurationError(
+            "Global and per-server configuration snapshots were removed; drop "
+            f"{found[0]} from the [{label}] configuration table"
+        )
 
 
 def _boolean(raw: dict[str, Any], name: str, default: bool, label: str) -> bool:

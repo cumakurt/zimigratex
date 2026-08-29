@@ -25,6 +25,8 @@ class CliTests(unittest.TestCase):
 
         self.assertIsNone(export_arguments.config)
         self.assertEqual(export_arguments.archive, Path("export_data"))
+        self.assertIsNone(export_arguments.target_ip)
+        self.assertEqual(export_arguments.ssh_user, "root")
         self.assertEqual(export_arguments.user, [])
         self.assertEqual(export_arguments.domain, [])
         self.assertIsNone(import_arguments.config)
@@ -86,7 +88,6 @@ class CliTests(unittest.TestCase):
         self.assertEqual(result, 0)
         scoped = captured[0]
         self.assertEqual(scoped.transfer.target_users, ("deneme@deneme.com",))
-        self.assertFalse(scoped.transfer.include_global_config)
         self.assertFalse(scoped.transfer.include_distribution_lists)
 
     def test_invalid_user_flag_is_rejected(self) -> None:
@@ -104,6 +105,9 @@ class CliTests(unittest.TestCase):
         archive = MagicMock()
         archive.root = DEFAULT_ARCHIVE.resolve()
         archive.lock.return_value = nullcontext()
+        archive.manifest.return_value = {"export_options": {}, "completed": True}
+        archive.iter_entities.return_value = []
+        archive.state.get.return_value = None
         events: list[str] = []
         importer = MagicMock()
         importer.run.side_effect = lambda: events.append("import") or {"import:account": 1}
@@ -133,6 +137,9 @@ class CliTests(unittest.TestCase):
         config = _config()
         archive = MagicMock()
         archive.lock.return_value = nullcontext()
+        archive.manifest.return_value = {"export_options": {}, "completed": True}
+        archive.iter_entities.return_value = []
+        archive.state.get.return_value = None
 
         with (
             patch("zimigrate.cli.configure_logging"),
@@ -149,6 +156,29 @@ class CliTests(unittest.TestCase):
 
         self.assertEqual(result, 1)
         importer.assert_not_called()
+
+    def test_export_target_ip_runs_remote_orchestrator(self) -> None:
+        config = _config()
+        archive = MagicMock()
+        archive.lock.return_value = nullcontext()
+        archive.manifest.return_value = None
+        remote = MagicMock(return_value={"host": "192.0.2.10", "completed": True})
+
+        with (
+            patch("zimigrate.cli.configure_logging"),
+            patch("zimigrate.cli.load_config", return_value=config),
+            patch("zimigrate.cli.MigrationArchive", return_value=archive),
+            patch("zimigrate.cli.run_remote_export", remote),
+            patch("zimigrate.cli.Exporter") as exporter,
+            redirect_stdout(io.StringIO()),
+        ):
+            result = main(["export", "--target-ip", "192.0.2.10"])
+
+        self.assertEqual(result, 0)
+        remote.assert_called_once()
+        self.assertEqual(remote.call_args.kwargs["host"], "192.0.2.10")
+        self.assertEqual(remote.call_args.kwargs["ssh_user"], "root")
+        exporter.assert_not_called()
 
 
 def _config() -> AppConfig:

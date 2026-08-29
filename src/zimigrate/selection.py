@@ -27,8 +27,6 @@ CATEGORIES = (
         "include_distribution_lists",
         "Static and dynamic distribution lists",
     ),
-    Category("global_config", "include_global_config", "Global configuration snapshot"),
-    Category("server_config", "include_server_config", "Per-server configuration snapshots"),
 )
 CATEGORY_BY_KEY = {category.key: category for category in CATEGORIES}
 DEPENDENCIES = {
@@ -36,6 +34,9 @@ DEPENDENCIES = {
     "mailboxes": {"accounts", "domains", "cos"},
     "distribution_lists": {"domains"},
 }
+MAILBOX_CATEGORY = "mailboxes"
+WITHOUT_MAILBOXES_CHOICE = "without_mailboxes"
+WITHOUT_MAILBOXES_LABEL = "Everything except mailbox data"
 
 
 def all_categories() -> set[str]:
@@ -81,6 +82,17 @@ def exported_categories(export_options: object) -> set[str]:
     return normalize_categories(selected)
 
 
+def without_mailbox_categories(available: set[str], disabled: set[str] | None = None) -> set[str]:
+    blocked = disabled or set()
+    return {
+        category.key
+        for category in CATEGORIES
+        if category.key != MAILBOX_CATEGORY
+        and category.key in available
+        and category.key not in blocked
+    }
+
+
 def prompt_categories(
     action: str,
     *,
@@ -103,6 +115,11 @@ def prompt_categories(
         else:
             enabled_numbers[str(number)] = category.key
         print(f"  {number}. {category.label}{suffix}")
+    without_mailboxes = without_mailbox_categories(available, set(disabled_reasons))
+    shortcut = str(len(CATEGORIES) + 1)
+    if without_mailboxes:
+        print(f"  {shortcut}. {WITHOUT_MAILBOXES_LABEL}")
+        enabled_numbers[shortcut] = WITHOUT_MAILBOXES_CHOICE
     print("Enter comma-separated numbers, or press Enter for all available defaults.")
     response = input("Selection: ").strip().lower()
     if not response or response == "all":
@@ -114,7 +131,13 @@ def prompt_categories(
             raise ConfigurationError(
                 f"Invalid or disabled category selection: {sorted(invalid)[0]}"
             )
-        selected = {enabled_numbers[token] for token in tokens}
+        selected = set()
+        for token in tokens:
+            choice = enabled_numbers[token]
+            if choice == WITHOUT_MAILBOXES_CHOICE:
+                selected.update(without_mailboxes)
+            else:
+                selected.add(choice)
     if not selected:
         raise ConfigurationError("At least one migration category must be selected")
     normalized = normalize_categories(selected)
@@ -133,3 +156,36 @@ def prompt_categories(
     if added:
         print("Automatically included dependencies: " + ", ".join(sorted(added)))
     return normalized
+
+
+def prompt_import_scope(*, has_domains: bool) -> str:
+    print("\nSelect import scope:")
+    print("  1. Entire archive [default]")
+    if has_domains:
+        print("  2. Selected domain(s)")
+    print("Enter a number, or press Enter for the entire archive.")
+    response = input("Scope: ").strip()
+    if not response or response == "1":
+        return "full"
+    if has_domains and response == "2":
+        return "domains"
+    raise ConfigurationError(f"Invalid import scope selection: {response or 'empty'}")
+
+
+def prompt_domain_selection(domains: list[str]) -> list[str]:
+    if not domains:
+        raise ConfigurationError("This archive contains no domains to select")
+    print("\nSelect domain(s) to import:")
+    enabled = {str(number): name for number, name in enumerate(domains, start=1)}
+    for number, name in enumerate(domains, start=1):
+        print(f"  {number}. {name}")
+    print("Enter comma-separated numbers.")
+    response = input("Domains: ").strip()
+    if not response:
+        raise ConfigurationError("At least one domain must be selected")
+    tokens = {token.strip() for token in response.split(",") if token.strip()}
+    invalid = tokens.difference(enabled)
+    if invalid:
+        raise ConfigurationError(f"Invalid domain selection: {sorted(invalid)[0]}")
+    selected = [enabled[token] for token in sorted(tokens, key=int)]
+    return selected

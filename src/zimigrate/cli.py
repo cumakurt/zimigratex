@@ -10,12 +10,14 @@ from pathlib import Path
 
 from zimigrate import __version__
 from zimigrate.archive import MigrationArchive
+from zimigrate.backups import discover_backups, prompt_backup_choice
 from zimigrate.config import AppConfig, load_config
 from zimigrate.errors import ConfigurationError, Interrupted, ZimigrateError
 from zimigrate.exporter import Exporter
 from zimigrate.importer import Importer
 from zimigrate.interrupt import get_interrupt, handle_sigint
 from zimigrate.logging_setup import configure_logging
+from zimigrate.remote_export import resolve_remote_host, run_remote_export
 from zimigrate.scope import (
     apply_scope_to_transfer,
     parse_bound_scope,
@@ -27,6 +29,8 @@ from zimigrate.selection import (
     all_categories,
     exported_categories,
     prompt_categories,
+    prompt_domain_selection,
+    prompt_import_scope,
     selected_categories,
     transfer_with_categories,
 )
@@ -54,7 +58,7 @@ def build_parser() -> argparse.ArgumentParser:
     commands = parser.add_subparsers(dest="command", required=True)
 
     command_descriptions = {
-        "export": "export the local Zimbra server into a resumable archive",
+        "export": "export Zimbra into a resumable archive; use --target-ip to run it over SSH",
         "import": "validate an archive and import it into the local Zimbra server",
         "verify": "validate archive structure and mailbox artifacts",
         "verify-target": "compare imported destination objects with the archive",
@@ -89,6 +93,17 @@ def build_parser() -> argparse.ArgumentParser:
     commands.choices["verify"].add_argument(
         "--deep", action="store_true", help="scan every mailbox archive"
     )
+    commands.choices["export"].add_argument(
+        "--target-ip",
+        metavar="HOST",
+        help="SSH to this Zimbra host, run export there, and store the archive locally",
+    )
+    commands.choices["export"].add_argument(
+        "--ssh-user",
+        default="root",
+        metavar="NAME",
+        help="SSH username (default: root). A password is requested only when key login fails",
+    )
 
     preflight = commands.add_parser(
         "preflight",
@@ -108,12 +123,16 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    argv = list(sys.argv[1:] if argv is None else argv)
     parser = build_parser()
     arguments = parser.parse_args(argv)
+    remote_host = None
+    if arguments.command == "export":
+        remote_host = resolve_remote_host(arguments.archive, getattr(arguments, "target_ip", None))
     logging_session = configure_logging(
         verbose=arguments.verbose,
         json_logs=arguments.json_logs,
-        operation=arguments.command,
+        operation="remote-export" if remote_host else arguments.command,
     )
     interrupt = get_interrupt()
     interrupt.clear()
@@ -161,13 +180,25 @@ def main(argv: list[str] | None = None) -> int:
             with archive.lock():
                 config = _configure_export_categories(config, archive)
                 logging_session.start()
-                result = Exporter(config, archive).run()
+                if remote_host:
+                    result = run_remote_export(
+                        archive,
+                        config.transfer,
+                        host=remote_host,
+                        ssh_user=getattr(arguments, "ssh_user", "root"),
+                        verbose=arguments.verbose,
+                        json_logs=arguments.json_logs,
+                    )
+                else:
+                    result = Exporter(config, archive).run()
         elif arguments.command == "import":
+            archive_path = _resolve_import_archive(arguments.archive, argv)
             archive = MigrationArchive(
-                arguments.archive,
+                archive_path,
                 create=False,
             )
             with archive.lock():
+                config = _configure_import_categories(config, archive)
                 logging_session.start()
                 LOGGER.info("Validating the complete archive before import")
                 verification = verify_archive(
@@ -175,9 +206,6 @@ def main(argv: list[str] | None = None) -> int:
                     deep=True,
                     workers=config.transfer.workers,
                 )
-                logging_session.pause()
-                config = _configure_import_categories(config, archive)
-                logging_session.start()
                 LOGGER.info(
                     "Archive validation passed; starting local import",
                     extra={"archive": archive.root},
@@ -354,8 +382,6 @@ def _configure_import_categories(
                         ("accounts", "include_accounts"),
                         ("mailboxes", "include_mailboxes"),
                         ("distribution_lists", "include_distribution_lists"),
-                        ("global_config", "include_global_config"),
-                        ("server_config", "include_server_config"),
                     )
                     if options.get(field, True)
                 }
@@ -369,29 +395,48 @@ def _configure_import_categories(
                 return replace(config, transfer=transfer)
     manifest = archive.manifest()
     available = exported_categories(manifest.get("export_options"))
-    disabled_reasons: dict[str, str] = {}
-    if "global_config" in available and not config.import_options.apply_global_config:
-        disabled_reasons["global_config"] = "enable apply_global_config with an allowlist"
-    if "server_config" in available and not config.import_options.apply_server_config:
-        disabled_reasons["server_config"] = "enable apply_server_config with an allowlist"
     if cli_scope.active:
         LOGGER.info(
             "Limiting import to selected users and domains",
             extra={**cli_scope.as_options(), "event": "inventory"},
         )
         return config
+    domain_records = list(archive.iter_entities("domain")) if "domains" in available else []
+    domain_names = [record.name for record in domain_records]
     defaults = available.intersection(selected_categories(config.transfer))
+    selected_domains: list[str] = []
     if _is_interactive():
+        if prompt_import_scope(has_domains=bool(domain_names)) == "domains":
+            selected_domains = prompt_domain_selection(domain_names)
         selected = prompt_categories(
             "import",
             available=available,
             defaults=defaults,
-            disabled_reasons=disabled_reasons,
         )
     else:
-        selected = defaults.difference(disabled_reasons)
+        selected = set(defaults)
     transfer = transfer_with_categories(config.transfer, selected)
+    if selected_domains:
+        transfer = apply_scope_to_transfer(
+            transfer,
+            parse_target_scope([], selected_domains),
+        )
+        print("Importing selected domain(s): " + ", ".join(selected_domains))
     return replace(config, transfer=transfer)
+
+
+def _resolve_import_archive(configured: Path, argv: list[str]) -> Path:
+    if not _is_interactive() or _has_option(argv, "--archive"):
+        return configured
+    backups = discover_backups(Path.cwd())
+    if not backups:
+        return configured
+    return prompt_backup_choice(backups, default=configured)
+
+
+def _has_option(argv: list[str], option: str) -> bool:
+    prefix = f"{option}="
+    return any(item == option or item.startswith(prefix) for item in argv)
 
 
 def _is_interactive() -> bool:

@@ -5,8 +5,14 @@ data-source credentials are stored in plaintext in the archive. Keep the archive
 trusted encrypted storage, limit operating-system access, and securely dispose of it
 after the migration retention period.
 
-The tool does not execute commands through SSH or another remote shell. Source export
-and destination import run only against the Zimbra installation on the current machine.
+The default export and import run only against the Zimbra installation on the current
+machine. `export --target-ip` is opt-in SSH: OpenSSH and rsync copy this toolkit to the
+Zimbra host, run local `zmprov` there, and copy each completed mailbox artifact to the
+operator workstation before deleting it on the Zimbra host. Key authentication is tried
+first. A password is requested only when key login fails, is stored in a mode `0600`
+temporary file for OpenSSH ASKPASS, and is never passed as a process argument. TOML
+`[source]` / `[target]` SSH settings remain rejected.
+
 It uses shell-free subprocess execution and runs local Zimbra administrative commands
 under the `zimbra` operating-system account. Sensitive provisioning values, including
 account create and password-hash restore, are supplied through `zmprov`'s stdin batch
@@ -16,12 +22,10 @@ cache is then flushed over SOAP so restored credentials are used immediately.
 
 Plaintext mailbox archive data exists temporarily while Zimbra produces or consumes one
 artifact. Temporary files are mode `0600`, are removed after each operation, and live
-under the archive's mode `0700` `.tmp` directory. Place the archive on an encrypted
-filesystem if plaintext remnants in storage are in scope for your threat model.
-
-Global/server configuration import requires an explicit allowlist. Sensitive attributes
-are additionally blocked unless `allow_sensitive_config = true`; enabling it requires a
-manual security and topology review.
+under the archive's mode `0700` `.tmp` directory. Remote export copies each completed
+artifact to the operator workstation over SSH and then deletes it on the Zimbra host.
+Place the archive on an encrypted filesystem if plaintext remnants in storage are in
+scope for your threat model.
 
 Mailbox payloads and provisioning records are checksummed with SHA-256. `manifest.json`
 is the archive inventory and `state.sqlite3` binds each provisioning record to its

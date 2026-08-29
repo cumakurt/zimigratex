@@ -191,8 +191,6 @@ class Importer:
             distribution_records,
             self._import_distribution_members,
         )
-        LOGGER.info("Importing optional global and server configuration")
-        self._import_optional_configuration()
 
         failed = [
             record for record in self.archive.state.failed() if record.phase.startswith("import:")
@@ -923,54 +921,6 @@ class Importer:
         complete = self.archive.state.get("import:account-complete", record.name)
         return bool(complete and complete.detail == "skipped-system-account")
 
-    def _import_optional_configuration(self) -> None:
-        options = self.config.import_options
-        if options.apply_global_config and self.config.transfer.include_global_config:
-            records = list(self.archive.iter_entities("global_config"))
-            if records:
-                phase = "import:global-config"
-                if not self.archive.state.is_success(phase, "global"):
-                    self.archive.state.start(phase, "global")
-                    try:
-                        attributes = mutable_attributes(
-                            "global_config",
-                            records[0].attributes,
-                            allowlist=options.global_attribute_allowlist,
-                            allow_sensitive=options.allow_sensitive_config,
-                        )
-                        self._apply("global_config", "global", attributes)
-                        self.archive.state.succeed(phase, "global")
-                    except Exception as exc:
-                        self.archive.state.fail(phase, "global", _error_summary(exc))
-                        raise
-
-        if options.apply_server_config and self.config.transfer.include_server_config:
-            for record in self.archive.iter_entities("server"):
-                destination = options.server_map.get(record.name)
-                if not destination:
-                    self.warnings.write(
-                        record.name, "server", "server has no import.server_map destination"
-                    )
-                    continue
-                if not self.client.exists("server", destination):
-                    raise ZimigrateError(f"Mapped destination server does not exist: {destination}")
-                phase = "import:server-config"
-                if self.archive.state.is_success(phase, record.name):
-                    continue
-                self.archive.state.start(phase, record.name)
-                try:
-                    attributes = mutable_attributes(
-                        "server",
-                        record.attributes,
-                        allowlist=options.server_attribute_allowlist,
-                        allow_sensitive=options.allow_sensitive_config,
-                    )
-                    self._apply("server", destination, attributes)
-                    self.archive.state.succeed(phase, record.name)
-                except Exception as exc:
-                    self.archive.state.fail(phase, record.name, _error_summary(exc))
-                    raise
-
     def _validate_target_mailhosts(self) -> None:
         if not self.config.transfer.include_accounts:
             return
@@ -989,23 +939,15 @@ class Importer:
                 "existing_policy": options.existing_policy,
                 "mailbox_conflict_resolution": options.mailbox_conflict_resolution,
                 "strict_attributes": options.strict_attributes,
-                "apply_global_config": options.apply_global_config,
-                "global_attribute_allowlist": list(options.global_attribute_allowlist),
-                "apply_server_config": options.apply_server_config,
-                "server_attribute_allowlist": list(options.server_attribute_allowlist),
-                "server_map": options.server_map,
                 "mailhost_map": options.mailhost_map,
                 "default_mailhost": options.default_mailhost,
                 "import_system_accounts": options.import_system_accounts,
-                "allow_sensitive_config": options.allow_sensitive_config,
                 "allow_unverified_remote_capacity": (options.allow_unverified_remote_capacity),
                 "include_domains": self.config.transfer.include_domains,
                 "include_cos": self.config.transfer.include_cos,
                 "include_accounts": self.config.transfer.include_accounts,
                 "include_mailboxes": self.config.transfer.include_mailboxes,
                 "include_distribution_lists": (self.config.transfer.include_distribution_lists),
-                "include_global_config": self.config.transfer.include_global_config,
-                "include_server_config": self.config.transfer.include_server_config,
                 "target_users": list(self.config.transfer.target_users),
                 "target_domains": list(self.config.transfer.target_domains),
             },

@@ -22,6 +22,24 @@ class ConfigTests(unittest.TestCase):
         self.assertTrue(config.import_options.allows_version("Release 10.1.18.GA FOSS"))
         self.assertFalse(config.import_options.allow_unverified_remote_capacity)
 
+    def test_removed_global_and_server_config_settings_are_rejected(self) -> None:
+        values = (
+            "[transfer]\ninclude_global_config = true\n",
+            "[transfer]\ninclude_server_config = false\n",
+            "[import]\napply_global_config = true\n",
+            "[import]\napply_server_config = true\n",
+            "[import]\nallow_sensitive_config = true\n",
+            '[import.server_map]\n"old.example.com" = "new.example.com"\n',
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            for index, config_text in enumerate(values):
+                with self.subTest(config_text=config_text):
+                    path = Path(directory) / f"removed-{index}.toml"
+                    path.write_text(config_text, encoding="utf-8")
+                    with self.assertRaises(ConfigurationError) as raised:
+                        load_config(path)
+                    self.assertIn("removed", str(raised.exception).lower())
+
     def test_removed_archive_encryption_settings_are_rejected(self) -> None:
         config_text = """
 [archive]

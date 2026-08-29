@@ -71,6 +71,12 @@ class MigrationArchive:
     def lock(self) -> FileLock:
         return FileLock(self.root / ".lock")
 
+    def close_state(self) -> None:
+        self.state.close()
+
+    def reopen_state(self) -> None:
+        self.state = StateStore(ensure_relative_path(self.root, "state.sqlite3"))
+
     def entity_relative_path(self, kind: str, name: str) -> str:
         return f"objects/{kind}/{safe_entity_filename(name)}.json"
 

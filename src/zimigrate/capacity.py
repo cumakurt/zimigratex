@@ -38,6 +38,7 @@ class DiskCapacityAssessment:
     operational_reserve_bytes: int
     estimated_required_free_bytes: int
     estimated_free_after_export_bytes: int
+    drain_completed_artifacts: bool
 
     def as_dict(self) -> dict[str, object]:
         value = asdict(self)
@@ -91,6 +92,7 @@ def assess_export_disk(
     mailbox_usage: dict[str, int],
     include_mailboxes: bool,
     workers: int,
+    drain_completed_artifacts: bool = False,
 ) -> DiskCapacityAssessment:
     disk = shutil.disk_usage(archive_path)
     normalized_usage = {name.casefold(): size for name, size in mailbox_usage.items()}
@@ -134,18 +136,22 @@ def assess_export_disk(
     estimated_metadata_bytes = (
         METADATA_BASE_BYTES + len(remaining_accounts) * METADATA_PER_ACCOUNT_BYTES
     )
-    estimated_archive_growth_bytes = estimated_archive_mailbox_bytes + estimated_metadata_bytes
-    reserve_basis = estimated_archive_growth_bytes + estimated_temporary_bytes
+    if drain_completed_artifacts:
+        # Completed mailbox files are copied off this host immediately, so free
+        # space only needs to cover metadata plus in-flight worker output.
+        estimated_archive_growth_bytes = estimated_metadata_bytes
+        estimated_resident_bytes = estimated_metadata_bytes + estimated_temporary_bytes * 2
+    else:
+        estimated_archive_growth_bytes = estimated_archive_mailbox_bytes + estimated_metadata_bytes
+        estimated_resident_bytes = estimated_archive_growth_bytes + estimated_temporary_bytes
     operational_reserve_bytes = min(
         MAX_OPERATIONAL_RESERVE_BYTES,
         max(
             MIN_OPERATIONAL_RESERVE_BYTES,
-            math.ceil(reserve_basis * OPERATIONAL_RESERVE_FACTOR),
+            math.ceil(estimated_resident_bytes * OPERATIONAL_RESERVE_FACTOR),
         ),
     )
-    estimated_required_free_bytes = (
-        estimated_archive_growth_bytes + estimated_temporary_bytes + operational_reserve_bytes
-    )
+    estimated_required_free_bytes = estimated_resident_bytes + operational_reserve_bytes
     if disk.free < estimated_required_free_bytes:
         status = "insufficient"
     elif disk.free < math.ceil(estimated_required_free_bytes * WARNING_HEADROOM_FACTOR):
@@ -169,6 +175,7 @@ def assess_export_disk(
         operational_reserve_bytes=operational_reserve_bytes,
         estimated_required_free_bytes=estimated_required_free_bytes,
         estimated_free_after_export_bytes=max(0, disk.free - estimated_archive_growth_bytes),
+        drain_completed_artifacts=drain_completed_artifacts,
     )
 
 

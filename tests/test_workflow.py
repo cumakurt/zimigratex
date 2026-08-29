@@ -121,6 +121,8 @@ class WorkflowTests(unittest.TestCase):
             self.assertIn("Export finished successfully", export_messages)
             exported_account = archive.read_entity("account", "user@example.com")
             self.assertGreater(exported_account.artifacts[0].unpacked_size, 0)
+            self.assertEqual(list(archive.iter_entities("global_config")), [])
+            self.assertEqual(list(archive.iter_entities("server")), [])
 
             target = FakeTarget(Path(directory))
             importer = Importer(config, archive)
@@ -468,40 +470,6 @@ class WorkflowTests(unittest.TestCase):
                 ["target-cos"],
             )
 
-    def test_target_verification_uses_bound_optional_configuration(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            base = _config()
-            config = replace(
-                base,
-                import_options=replace(
-                    base.import_options,
-                    apply_global_config=True,
-                    global_attribute_allowlist=("zimbraDefaultDomainName",),
-                    apply_server_config=True,
-                    server_attribute_allowlist=("zimbraServiceEnabled",),
-                    server_map={"old.example.com": "mailbox-1.example.com"},
-                ),
-            )
-            archive = MigrationArchive(Path(directory) / "archive", create=True)
-            exporter = Exporter(config, archive)
-            exporter.client = FakeSource()
-            exporter.run()
-            target = FakeTarget(Path(directory))
-            target.objects[("server", "mailbox-1.example.com")] = {"zimbraId": ["target-server"]}
-            importer = Importer(config, archive)
-            importer.client = target
-            importer.run()
-
-            verification = TargetVerifier(_config(), archive)
-            verification.client = target
-            self.assertEqual(verification.run()["mismatches"], 0)
-
-            target.global_config["zimbraDefaultDomainName"] = ["changed.example.com"]
-            changed = TargetVerifier(_config(), archive)
-            changed.client = target
-            with self.assertRaises(ZimigrateError):
-                changed.run()
-
 
 class FakeSource:
     def preflight(self, *, require_mailbox: bool = False, **_: object) -> str:
@@ -511,9 +479,6 @@ class FakeSource:
 
     def hostname(self) -> str:
         return "old.example.com"
-
-    def get_global_config(self) -> dict[str, list[str]]:
-        return {"zimbraDefaultDomainName": ["example.com"]}
 
     def list_servers(self) -> list[str]:
         return ["old.example.com"]
@@ -630,7 +595,6 @@ class FakeTarget:
         self.mailbox_statuses: list[list[str]] = []
         self.cache_flushes: list[tuple[str, str]] = []
         self.cache_flush_servers: list[str | None] = []
-        self.global_config: dict[str, list[str]] = {}
 
     def get_current_volume_paths(self) -> dict[str, list[Path]]:
         return {
@@ -675,14 +639,6 @@ class FakeTarget:
     def modify(self, kind: str, name: str, operations: list[str], *, sensitive: bool) -> None:
         del sensitive
         self.mutations.append(operations)
-        if kind == "global_config":
-            for attribute, value in zip(operations[::2], operations[1::2], strict=True):
-                key = attribute.lstrip("+")
-                if attribute.startswith("+"):
-                    self.global_config.setdefault(key, []).append(value)
-                else:
-                    self.global_config[key] = [value]
-            return
         normalized = "distribution_list" if kind == "dynamic_distribution_list" else kind
         attributes = self.objects[(normalized, name)]
         for attribute, value in zip(operations[::2], operations[1::2], strict=True):
@@ -706,9 +662,6 @@ class FakeTarget:
 
     def get_distribution_list(self, name: str) -> dict[str, list[str]]:
         return self.objects[("distribution_list", name)]
-
-    def get_global_config(self) -> dict[str, list[str]]:
-        return self.global_config
 
     def add_account_alias(self, account: str, alias: str) -> None:
         self.objects[("account", account)].setdefault("zimbraMailAlias", []).append(alias)

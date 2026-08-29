@@ -2,181 +2,52 @@
 
 [Türkçe dokümantasyon](README.tr.md)
 
-`zimigrate` creates a resumable local export of Zimbra provisioning data
-and mailbox content, then imports the manually transferred directory on the local
-destination Zimbra server. Export and import probe `zmprov`, `zmmailbox`, and
-`zmcontrol` instead of requiring a single Zimbra release. It does not connect to
-another server with SSH and never starts an import after export.
+`zimigrate` creates a resumable export of Zimbra provisioning data and mailbox
+content, then imports that archive on a destination Zimbra server. Export and import
+probe `zmprov`, `zmmailbox`, and `zmcontrol` instead of requiring a single Zimbra
+release. Export never starts an import.
 
-## Simple workflow
+Two export placements are supported:
 
-Install `zimigrate` on both Zimbra servers. Copy the whole repository, including the
-`vendor/` directory. `export.sh` and `import.sh` use that directory first: a pinned
-CPython 3.12 runtime, pip wheels, and a CA bundle. They install OS Python packages or
-download from GitHub only when `vendor/` is missing. `export_data` is created in the
-current working directory, so change to a volume with enough free space and run:
+- **Local:** run on the Zimbra host; the archive is written in the current directory.
+- **Remote:** run on a workstation with `./export.sh --target-ip HOST`; export runs on
+  that Zimbra host over SSH, and the archive stays on the workstation.
 
-```bash
-/path/to/zimigratex/export.sh
-```
+## Contents
 
-The command exports all selected data from the local
-Zimbra installation, and creates:
+- [Install and run](#install-and-run)
+- [Commands](#commands)
+- [Usage alternatives](#usage-alternatives)
+- [Interactive menus](#interactive-menus)
+- [What is exported](#what-is-exported)
+- [Import validation](#import-validation)
+- [Requirements](#requirements)
+- [Optional configuration](#optional-configuration)
+- [Reliability and security](#reliability-and-security)
+- [Known boundaries](#known-boundaries)
+- [Development](#development)
 
-```text
-./export_data/
-```
+## Install and run
 
-If the process is interrupted, `Ctrl+C` stops in-flight Zimbra commands immediately.
-Rerun `./export.sh` or `zimigrate export` from the same directory to resume.
-Successful units are skipped and incomplete units resume. Export completion never
-starts an import. Resume is bound to the original source host, Zimbra version, scope,
-and export options. A successful checkpoint is reused only while its record and every
-referenced mailbox artifact still match their recorded checksum and size.
+Copy the whole repository, including `vendor/`. Change to a volume with enough free
+space: `export_data` is created in the **current working directory**, not next to the
+scripts.
 
-## Backup a domain or one account
-
-`export.sh` and `import.sh` pass extra arguments to `zimigrate`. Use `--user` or
-`--domain` (repeatable, comma-separated values allowed) to limit work to one mailbox
-or one domain and the objects it needs. A scoped run skips the category prompt and
-does not copy global or per-server configuration.
-
-```bash
-./export.sh --user user@example.com
-./export.sh --domain example.com
-./export.sh --archive ./backup_example --domain example.com
-```
-
-Import can apply the same filter to a **full** archive, so you can export everything
-once and restore a single mailbox later:
-
-```bash
-./import.sh --user user@example.com
-./import.sh --domain example.com
-```
-
-`--user` restores that account, its domain, its COS, and its mailbox. `--domain`
-also restores the domain's alias domains, accounts, and distribution lists. Resume the
-same scoped command; changing `--user`/`--domain` mid-archive requires a new archive
-directory (export) or a copied archive with a fresh `state.sqlite3` (import).
-
-After the export process has stopped, manually transfer the entire `export_data`
-directory to the destination. Preserve permissions and files such as
-`export_data/manifest.json`. For example, with removable
-or mounted storage:
-
-```bash
-cp -a export_data /mnt/transfer/
-```
-
-Before exporting, `zimigrate` displays domains/COS, accounts, mailbox content,
-distribution lists, global settings, and server settings for operator selection. Account
-and mailbox selections automatically include dependencies. Local `zmprov gqu` usage,
-archive growth, worker temporary space, and a safety reserve are checked; insufficient
-space aborts before data is written. The report is
-`export_data/reports/export-disk-assessment.json`.
-
-On the destination server, place the copied directory in the current working directory:
-
-```text
-./export_data/
-```
-
-Then run:
-
-```bash
-/path/to/zimigratex/import.sh
-```
-
-The command performs a complete validation before any destination change. It requires
-the original SQLite checkpoint database, verifies every provisioning-record and mailbox
-SHA-256 value, rejects unreferenced files, scans every ZIP/TGZ mailbox archive, and
-checks manifest counts. Only after all checks pass does it verify every required
-`zmprov`/`zmmailbox` command and begin the local import. A validation or capability
-failure exits before changing the destination.
-
-After validation, import displays the archive categories for selection. Global and server
-settings require their explicit allowlists. Before any target mutation, current
-`zmvolume -l` message/index volumes and temporary space are checked. Insufficient space
-aborts the import and writes `export_data/reports/import-disk-assessment.json`. A local
-process cannot measure a mapped remote mailbox host, so such a mapping aborts by default.
-`allow_unverified_remote_capacity = true` is an explicit operator acceptance and must be
-used only after checking every remote message and index volume.
-
-Interrupted imports resume with the same command. A successful import automatically
-compares destination objects, portable attributes, aliases, identities, signatures,
-data sources, distribution members, and mailbox checkpoints with the archive:
-
-```bash
-./import.sh
-```
-
-The same target verification can be repeated independently. It reads the import-bound
-category, mapping, and optional-configuration policies from the checkpoint database:
-
-```bash
-zimigrate verify-target
-```
-
-Incomplete accounts remain in `maintenance` to prevent concurrent user writes. Their
-source status is restored only after all metadata and mailbox stages succeed. Account
-creates and password hashes are written with `zmprov -l` (LDAP-direct) so Zimbra does
-not re-hash an `{SSHA}` value. After that restore, zimigrate runs SOAP `zmprov fc account`
-so mailboxd drops its cached LDAP entry instead of serving the empty password or
-`maintenance` status until `ldap_cache_account_maxage` (default 15 minutes) expires.
-
-## What is exported
-
-- domains, alias domains, and domain attributes;
-- classes of service (COS), with source IDs remapped to destination IDs;
-- accounts and calendar resources, including password hashes, aliases, preferences,
-  forwarding/filter attributes, identities, signatures, and supported data sources;
-- static and dynamic distribution lists, aliases, attributes, and static members;
-- mail, calendars, contacts, tasks, and Briefcase content through Zimbra REST ZIP/TGZ;
-- a protected snapshot of global and per-server LDAP configuration.
-
-Live authentication tokens are never exported. System account metadata is archived,
-but system mailboxes and destination service identities are excluded by default because
-overwriting installation-owned accounts can break Zimbra. Global and per-server
-configuration is also archived but is applied only through an explicit attribute
-allowlist. These topology-specific values can contain host names, certificates, server
-IDs, ports, and LDAP/MTA settings that are unsafe to copy blindly.
-
-Zimbra stores four data-source credential fields encoded against the source
-`zimbraDataSourceId`. Export decodes those fields using Zimbra's long-standing
-LDAP encoding only inside the process, writes the plaintext into the archive,
-and lets the destination encrypt it against its newly generated data-source ID. During
-restore, each data source stays disabled until all attributes and credentials have been
-applied. Copying the LDAP ciphertext directly would create unusable credentials.
-
-## Requirements
-
-- Python 3.11 or newer and the Python `rich` package;
-- a 64-bit x86_64 glibc Linux host supported by the installed Zimbra release;
-- `zimigrate` installed on both the source and destination servers;
-- `/opt/zimbra/bin/zmprov`, `zmmailbox`, `zmcontrol`, and `zmhostname` locally available;
-- execution as the `zimbra` user, or local `sudo -n -u zimbra` permission;
-- enough archive space plus temporary space for one plaintext mailbox chunk per worker;
-- a local Zimbra FOSS installation whose administrative commands pass preflight.
-
-Install from the repository root (the directory that contains `pyproject.toml`,
-not `src/zimigrate`). The wrapper scripts are the supported operator path:
+`export.sh` and `import.sh` are the supported operator path. They use the vendored
+x86_64 glibc CPython 3.12 runtime, pip wheels, and CA bundle first. They install OS
+Python packages or download from GitHub only when `vendor/` is missing.
 
 ```bash
 /path/to/zimigratex/export.sh
 /path/to/zimigratex/import.sh
 ```
 
-If Python 3.11+, a virtualenv, and a current installation of the repository source are
-already present, the scripts skip OS package installation and env setup. Source changes
-invalidate the runtime stamp and trigger a package reinstall, preventing an old `.venv`
-from silently running stale migration code. Extra arguments are passed through, for
-example `./export.sh --archive /srv/migration/export_data`.
+If Python 3.11+, a virtualenv, and a current install of this repository are already
+present, the scripts skip OS package installation. Source changes invalidate the
+runtime stamp and reinstall the package so an old `.venv` cannot run stale code.
+Extra arguments are passed through.
 
-Copy `vendor/` with the repository. The wrappers extract the vendored x86_64 glibc
-CPython archive from `vendor/python/`, install `rich` from `vendor/wheels/` without
-contacting PyPI, and use `vendor/certs/cacert.pem` when a download is still required.
-Refresh those files on a machine with internet access:
+Refresh vendored files on a machine with internet access:
 
 ```bash
 ./scripts/vendor-runtime.sh
@@ -184,12 +55,11 @@ Refresh those files on a machine with internet access:
 
 If `vendor/` is absent and OS Python 3.11+ cannot be installed, the wrappers download
 the same pinned CPython 3.12 runtime, verify its SHA-256 digest, and continue. Missing
-optional packages such as `python3-venv` no longer block `ca-certificates`. If the
-mail host's TLS trust store cannot verify GitHub, the download retries after installing
-CA certificates and, as a last resort, without TLS verification; the pinned SHA-256
-digest still rejects a substituted archive. If a
-virtualenv still cannot be created, they run `zimigrate` from the repository `src/`
-tree after installing `rich` next to `.runtime/`.
+optional packages such as `python3-venv` do not block `ca-certificates`. If the host
+TLS store cannot verify GitHub, the download retries after installing CA certificates
+and, as a last resort, without TLS verification; the pinned digest still rejects a
+substituted archive. If a virtualenv still cannot be created, they run `zimigrate`
+from `src/` after installing `rich` under `.runtime/`.
 
 Manual install remains available:
 
@@ -200,107 +70,506 @@ python3 -m venv .venv
 python -m pip install .
 ```
 
-Export and import draw a live status panel on an interactive terminal. The panel
-stays on one screen and updates host, inventory, disk capacity, and per-phase
-progress in place instead of printing a new `info:` line for every object.
-`--verbose`, `--json-logs`, a non-TTY, `TERM=dumb`, or `ZIMIGRATE_PLAIN_OUTPUT=1`
-restore the classic line-oriented logs. `status` and `preflight` still print JSON.
+After that, `zimigrate` is on `PATH` for `status`, `verify`, `verify-target`, and
+`preflight`. Wrappers are still preferred for export and import.
 
-Example dashboard screens (generated from the built-in Rich renderer):
+No configuration file is required for the default workflow. Source and destination
+commands always execute against the **local** Zimbra installation. Multi-mailbox
+source content may still be fetched from an account's `zimbraMailHost` over Zimbra's
+admin REST port; that is not SSH command execution.
 
-![Export dashboard](docs/screenshots/export-dashboard.svg)
+TOML `[source]` / `[target]` SSH settings are rejected. Remote export is only
+`export --target-ip`.
 
-![Completed import dashboard](docs/screenshots/import-completed.svg)
+## Commands
 
-Regenerate these examples after changing the dashboard layout with:
+`--version`, `--verbose`, and `--json-logs` belong to the top-level `zimigrate`
+command and must appear **before** the subcommand:
 
 ```bash
-PYTHONPATH=src python scripts/generate-readme-screenshots.py
+zimigrate --verbose export --archive ./export_data
+zimigrate --json-logs import --archive ./export_data
 ```
 
-No configuration file is needed for the default workflow. The source and destination
-commands always execute against the local Zimbra installation. Multi-mailbox source
-content may still be routed by Zimbra to an account's `zimbraMailHost` over its admin
-REST port; this is not SSH command execution.
+`./export.sh` and `./import.sh` insert `export` / `import` before their extra
+arguments, so pass archive, scope, and SSH flags to the wrappers, not `--verbose`.
+For line-oriented logs with the wrappers, use `ZIMIGRATE_PLAIN_OUTPUT=1` or
+`TERM=dumb`.
 
-## Status and standalone validation
+| Command | Purpose |
+| --- | --- |
+| `./export.sh [options]` | Export (local Zimbra, or SSH with `--target-ip`) |
+| `./import.sh [options]` | Validate an archive and import into the local Zimbra |
+| `zimigrate export` | Same as `export.sh` after install |
+| `zimigrate import` | Same as `import.sh` after install |
+| `zimigrate status` | Checkpoint counts and failed units |
+| `zimigrate verify [--deep]` | Validate archive files without importing |
+| `zimigrate verify-target` | Compare the destination with the archive |
+| `zimigrate preflight` | Check local Zimbra commands and version |
 
-All commands use `./export_data` by default:
+Shared options on `export`, `import`, `verify`, and `verify-target`:
+
+| Option | Meaning |
+| --- | --- |
+| `--archive DIR` | Archive directory (default: `./export_data`) |
+| `--config FILE` | Optional TOML; secure defaults if omitted |
+| `--user EMAIL` | Limit to this account and its domain (repeatable) |
+| `--domain NAME` | Limit to this domain and its accounts (repeatable) |
+
+`--user` and `--domain` accept comma-separated values and may be repeated:
+
+```bash
+./export.sh --user a@example.com --user b@example.com
+./export.sh --domain example.com,other.com
+```
+
+Export-only:
+
+| Option | Meaning |
+| --- | --- |
+| `--target-ip HOST` | SSH to this Zimbra host, run export there, keep the archive here |
+| `--ssh-user NAME` | SSH username (default: `root`) |
+
+`verify` also accepts `--deep` (scan every mailbox ZIP/TGZ). Import always does that
+scan automatically.
+
+`preflight` accepts `--config FILE` and `--side source|target|both` (default: `source`).
+
+`status` accepts `--archive DIR` only.
+
+Help for each path:
+
+```bash
+./export.sh --help
+./import.sh --help
+zimigrate --help
+```
+
+## Usage alternatives
+
+### 1. Full local export on the Zimbra host
+
+Install or copy the repository onto the source Zimbra server, `cd` to a large volume,
+and run:
+
+```bash
+/path/to/zimigratex/export.sh
+```
+
+On a TTY this shows the category menu. Enter accepts every default (all categories).
+The command writes:
+
+```text
+./export_data/
+```
+
+`Ctrl+C` stops in-flight Zimbra commands. Rerun the same command in the same directory
+to resume.
+
+### 2. Remote export from a workstation
+
+From a machine that has `ssh` and `rsync` (not necessarily Zimbra):
+
+```bash
+./export.sh --target-ip 192.0.2.10
+./export.sh --target-ip mail.example.com --ssh-user root
+```
+
+Behavior:
+
+1. Category menu (and `--user` / `--domain` if given) runs on **this** machine.
+2. SSH tries key login as `--ssh-user` (default `root`). If that works, no password
+   is requested.
+3. If key login fails and stdin is a TTY, zimigrate asks for username (default
+   `root`) and password. The password is never placed on the `ssh` command line.
+4. This repository is copied to `/var/tmp/zimigratex/<archive-id>/` on the Zimbra host.
+5. Export runs there. Each completed mailbox file is rsync'd here immediately, then
+   deleted on Zimbra, so remote disk stays near in-flight worker output, not the full
+   backup.
+6. The workstation must have room for the **entire** archive. Zimbra is checked only
+   for in-flight peak (workers plus the file waiting to be pulled). Report:
+   `export_data/reports/export-disk-assessment.json`.
+
+Resume the same directory with or without `--target-ip`. The archive is bound to the
+original host; a different `--target-ip` is rejected. Mailbox files already on this
+machine are not copied back to Zimbra.
+
+Password SSH needs a TTY. Non-interactive remote export needs working SSH keys.
+The remote host must run `zmprov` as `zimbra` or via `sudo -n -u zimbra`.
+
+### 3. Resume an interrupted job
+
+```bash
+./export.sh
+./export.sh --target-ip 192.0.2.10
+./import.sh
+```
+
+Successful units are skipped. Incomplete units resume. Resume is bound to the original
+source host, Zimbra version, scope, and export options. A successful checkpoint is
+reused only while its record and every referenced mailbox artifact still match their
+recorded checksum and size.
+
+Changing `--user` / `--domain` mid-archive requires a **new** archive directory
+(export) or a copied archive with a fresh `state.sqlite3` (import). Import policies
+from the first import attempt are locked in the checkpoint and cannot change silently
+on resume.
+
+Do not copy `export_data` while zimigrate is running.
+
+### 4. One account or one domain
+
+A scoped run skips the category prompt. Dependencies are included automatically.
+
+```bash
+./export.sh --user user@example.com
+./export.sh --domain example.com
+./export.sh --archive ./backup_example --domain example.com
+```
+
+`--user` includes that account, its domain, its COS, and its mailbox (if mailboxes
+are enabled). `--domain` also includes alias domains, accounts, and distribution
+lists for that domain.
+
+Import can apply the same filter to a **full** archive (export once, restore one
+mailbox later):
+
+```bash
+./import.sh --user user@example.com
+./import.sh --domain example.com
+```
+
+`--user` / `--domain` also skip the interactive “entire archive vs domains” prompt.
+
+### 5. Custom archive directory
+
+```bash
+./export.sh --archive /srv/migration/export_data
+./import.sh --archive /srv/migration/export_data
+zimigrate status --archive /srv/migration/export_data
+```
+
+Use a separate directory per distinct scope, source host, or export-option set.
+
+### 6. Move a local archive to the destination
+
+After export has **stopped**, copy the whole directory. Preserve permissions and
+`manifest.json`, `state.sqlite3`, `objects/`, `mailboxes/`, and `reports/`.
+
+```bash
+cp -a export_data /mnt/transfer/
+```
+
+On the destination, place that directory in the working directory (default name
+`export_data`) or pass `--archive`.
+
+### 7. Interactive import (archive picker)
+
+On the destination, in a directory that contains one or more export archives, with a
+TTY and **without** `--archive`:
+
+```bash
+./import.sh
+```
+
+zimigrate lists each child directory that has `manifest.json` and `state.sqlite3`
+(skips `.git`, `.venv`, `src`, `vendor`, and similar). For each archive it shows
+completeness, source host, last update, domain/account/list counts, whether mailbox
+data is present, categories, and domain names. Choose a number, or Enter for the
+default (`./export_data` if it exists, otherwise the first listing).
+
+Then it asks:
+
+1. Entire archive, or selected domain(s) (if the archive has domains).
+2. The category menu (only categories that exist in that archive).
+
+Only the chosen scope and categories are imported.
+
+If stdin is not a TTY, or `--archive` is given, the picker is skipped
+(default `./export_data` unless `--archive` is set).
+
+```bash
+./import.sh --archive ./backup_example
+```
+
+### 8. Non-interactive / scripted runs
+
+A non-TTY uses config/CLI defaults: no category menu, no archive picker, no domain
+prompt. `--user` / `--domain` still apply.
+
+```bash
+./export.sh --archive /srv/export_data --domain example.com
+./import.sh --archive /srv/export_data --domain example.com
+zimigrate --verbose export --archive /srv/export_data --domain example.com
+zimigrate --json-logs import --archive /srv/export_data --domain example.com
+```
+
+`status` and `preflight` always print JSON. Export/import/verify print JSON only when
+the live panel is off (see [Logging and the status panel](#13-logging-and-the-status-panel)).
+
+### 9. Status, verify, and preflight
+
+All of these default to `./export_data` except `preflight` (no archive):
 
 ```bash
 zimigrate status
 zimigrate verify --deep
 zimigrate verify-target
+zimigrate preflight --side source
+zimigrate preflight --side target
+zimigrate preflight --side both
 ```
 
-`verify --deep` performs the same archive-level data validation that import always
-performs automatically.
+- `status` — operation counts and failed entities from `state.sqlite3`.
+- `verify --deep` — the same archive-level validation import always runs first.
+- `verify-target` — destination objects vs the archive; reads locked import
+  categories and mapping policy from the checkpoint. Import also runs this at the end.
+- `preflight` — installed `zmprov` / `zmmailbox` / `zmcontrol` and optional target
+  version pattern.
 
-## Optional advanced configuration
+### 10. Disk checks
 
-The no-argument workflow uses safe defaults: all normal accounts are selected, mailbox
-content and visible secret hashes are included, eight bounded workers are used, existing
-objects are merged, and mailbox conflicts are skipped. Use
-[config.example.toml](config.example.toml) only when those policies must change:
+**Export:** `zmprov gqu` usage, archive growth, per-worker temporary space, and a
+safety reserve. Insufficient space aborts before data is written.
+`export_data/reports/export-disk-assessment.json`.
+
+With `--target-ip`, that check on Zimbra covers in-flight files only. Size the
+workstation for the full archive.
+
+**Import:** `zmvolume -l` message/index volumes and temporary space, using each
+archive member's **expanded** size. Insufficient space aborts.
+`export_data/reports/import-disk-assessment.json`.
+
+A local process cannot measure a mapped remote mailbox host, so that mapping aborts
+by default. After checking every remote message and index volume, set
+`allow_unverified_remote_capacity = true` in the import config.
+
+### 11. After a successful import
+
+Incomplete accounts stay in `maintenance` until every metadata and mailbox stage
+succeeds, then the source status is restored. Account creates and password hashes use
+`zmprov -l` (LDAP-direct) so Zimbra does not re-hash `{SSHA}`. zimigrate then runs
+SOAP `zmprov fc account` so mailboxd drops a cached empty password or `maintenance`
+status before `ldap_cache_account_maxage` (default 15 minutes). If the cache flush
+fails, import stops and the account is put back in `maintenance`.
+
+Repeat target verification later:
+
+```bash
+zimigrate verify-target --archive ./export_data
+```
+
+### 12. Optional TOML for policy changes
+
+Copy [config.example.toml](config.example.toml) only when defaults must change:
 
 ```bash
 cp config.example.toml migration.toml
-zimigrate export --config migration.toml
-zimigrate import --config migration.toml
+./export.sh --config migration.toml
+./import.sh --config migration.toml --archive ./export_data
 ```
 
-Configuration cannot enable remote execution. Both commands remain local. Useful
-advanced settings include:
+If a config changes **import** behavior, copy that file to the destination and pass it
+again on the first import. See [Optional configuration](#optional-configuration).
 
-- worker count, retries, timeout, account include/exclude patterns;
-- `--user` / `--domain` for one-mailbox or one-domain backup and restore;
-- full or year-chunk mailbox exports and ZIP/TGZ format;
-- destination mailhost mapping for multi-mailbox installations;
-- existing-object and mailbox-conflict policies;
-- reviewed allowlists for global or per-server attributes.
+### 13. Logging and the status panel
 
-Strict attribute application is enabled by default. A target schema rejection stops the
-import instead of reporting success with missing preferences or filters. Set
-`strict_attributes = false` only after reviewing the generated warning report; service,
-connection, and timeout errors are never downgraded to attribute warnings. Year chunks
-use numeric UTC epoch boundaries so their ranges neither overlap nor depend on account
-locale. With `mailbox_conflict_resolution = "reset"`, only the first chunk resets the
-mailbox; later chunks use the idempotent `skip` policy so an earlier chunk is not erased.
-Mailbox export requests Zimbra REST `meta=1` and, by default, `lock=1`. If the installed
-Zimbra build rejects the requested lock, export stops; it never silently retries an
-unlocked snapshot. Set `mailbox_lock = false` only for a controlled maintenance window.
+Export, import, verify, and verify-target draw a live panel on an interactive
+terminal (host, inventory, disk, per-phase progress). Classic line logs are used when
+any of these apply:
 
-`--archive` is also retained for advanced layouts:
+- `--verbose`
+- `--json-logs`
+- non-TTY
+- `TERM=dumb`
+- `ZIMIGRATE_PLAIN_OUTPUT=1`
+
+Example panels (from the built-in Rich renderer):
+
+![Export dashboard](docs/screenshots/export-dashboard.svg)
+
+![Completed import dashboard](docs/screenshots/import-completed.svg)
+
+Regenerate after changing the dashboard layout:
 
 ```bash
-zimigrate export --archive /srv/migration/export_data
-zimigrate import --archive /srv/migration/export_data
+PYTHONPATH=src python scripts/generate-readme-screenshots.py
 ```
 
-When an advanced config changes import behavior, manually copy that config to the
-destination and pass it again. Import policies are bound to the first import checkpoint;
-they cannot silently change during a resume.
+## Interactive menus
+
+Shown only when stdin is a TTY and the run is not already scoped by `--user` /
+`--domain` (or a locked resume).
+
+### Category menu (export and import)
+
+```text
+Select data categories to export:
+  1. Domains and alias domains [default]
+  2. Classes of service (COS) [default]
+  3. Accounts, passwords, resources, identities, signatures, and preferences [default]
+  4. Mailbox messages and item data [default]
+  5. Static and dynamic distribution lists [default]
+  6. Everything except mailbox data
+```
+
+- Enter or `all` — all available defaults.
+- Comma-separated numbers — those categories.
+- `6` — every available category except mailbox data.
+
+Dependencies are added automatically:
+
+| You pick | Also included |
+| --- | --- |
+| Accounts | Domains, COS |
+| Mailboxes | Accounts, domains, COS |
+| Distribution lists | Domains |
+
+Import only offers categories that exist in the archive. Disabled rows cannot be
+selected.
+
+### Import scope
+
+```text
+Select import scope:
+  1. Entire archive [default]
+  2. Selected domain(s)
+```
+
+Option `2` lists domains from the archive; enter comma-separated numbers. Then the
+category menu still applies to that domain set.
+
+## What is exported
+
+- domains, alias domains, and domain attributes;
+- classes of service (COS), with source IDs remapped to destination IDs;
+- accounts and calendar resources, including password hashes, aliases, preferences,
+  forwarding/filter attributes, identities, signatures, and supported data sources;
+- static and dynamic distribution lists, aliases, attributes, and static members;
+- mail, calendars, contacts, tasks, and Briefcase content through Zimbra REST ZIP/TGZ;
+- portable `zimbraACE` source UUIDs remapped to destination UUIDs.
+
+Live authentication tokens are never exported. System account metadata is archived,
+but system mailboxes and destination service identities are excluded by default.
+Global and per-server LDAP configuration is not archived or applied (host names,
+certificates, server IDs, ports, LDAP/MTA topology).
+
+Zimbra stores four data-source credential fields encoded against the source
+`zimbraDataSourceId`. Export decodes them in process, writes plaintext into the
+archive, and lets the destination encrypt against its new data-source ID. During
+restore each data source stays disabled until all attributes and credentials are
+applied. Copying LDAP ciphertext would create unusable credentials.
+
+## Import validation
+
+`zimigrate import` does all of the following **before** any destination change:
+
+- completed, supported `manifest.json`;
+- original `state.sqlite3` present and readable;
+- every domain, COS, account, resource, and list record readable;
+- every provisioning record matches its checkpoint SHA-256;
+- manifest object counts match files on disk;
+- every mailbox file matches recorded size and SHA-256;
+- no unreferenced object or mailbox files;
+- every ZIP/TGZ is readable, intact, and uses safe member paths;
+- every required `zmprov` / `zmmailbox` command exists on this host.
+
+Any failure exits before changing the destination. After a fix or recopy, run import
+again.
+
+## Requirements
+
+- Python 3.11 or newer and the Python `rich` package (or the wrapper/`vendor` path);
+- a 64-bit x86_64 glibc Linux host supported by the installed Zimbra release;
+- for **local** export/import: `/opt/zimbra/bin/zmprov`, `zmmailbox`, `zmcontrol`,
+  `zmhostname`; run as `zimbra` or with `sudo -n -u zimbra`;
+- for **remote** export: local `ssh` and `rsync`; the Zimbra host still needs the
+  commands above;
+- enough workstation/archive space, plus temporary space for one plaintext mailbox
+  chunk per worker;
+- a local Zimbra FOSS installation that passes preflight (on the machine that runs
+  `zmprov`).
+
+## Optional configuration
+
+Defaults without a file: all normal accounts, mailbox content and visible secret
+hashes, eight workers, merge existing objects, skip mailbox conflicts, strict
+attributes, mailbox REST `meta=1` and `lock=1`.
+
+```bash
+cp config.example.toml migration.toml
+```
+
+Useful `[transfer]` keys:
+
+| Key | Default | Notes |
+| --- | --- | --- |
+| `workers` | `8` | 1–64 |
+| `retries` | `3` | Transient command failures only |
+| `retry_base_seconds` | `1.0` | Exponential backoff base |
+| `include_*` | `true` | Categories; CLI menu overrides on a TTY |
+| `include_system_mailboxes` | `false` | Dangerous if enabled |
+| `include_secrets` | `true` | Password hashes and data-source secrets |
+| `account_include` / `account_exclude` | `["*"]` / `[]` | fnmatch patterns |
+| `target_users` / `target_domains` | `[]` | Prefer CLI `--user` / `--domain` |
+| `mailbox_mode` | `"full"` | Or `"year-chunks"` |
+| `mailbox_format` | `"zip"` | Or `"tgz"` for older REST |
+| `mailbox_lock` | `true` | If Zimbra rejects `lock=1`, export stops |
+| `mailbox_start_year` | `1970` | Year-chunk start |
+| `mailbox_chunk_years` | `5` | Year-chunk width |
+
+Year chunks use numeric UTC epoch milliseconds (`date:<` / `date:>=`), not locale
+dates. Ranges do not overlap. With `mailbox_conflict_resolution = "reset"`, only the
+first chunk resets the mailbox; later chunks use `skip` so an earlier chunk is not
+erased. `mailbox_mode = "full"` is the most complete snapshot. REST query export can
+omit empty folders and items without a searchable date the same way Zimbra search
+does.
+
+Set `mailbox_lock = false` only in a controlled maintenance window.
+
+Useful `[import]` keys:
+
+| Key | Default | Notes |
+| --- | --- | --- |
+| `expected_target_version_pattern` | `""` | Empty = any preflight-passing release |
+| `existing_policy` | `"merge"` | `merge`, `skip`, or `fail` |
+| `mailbox_conflict_resolution` | `"skip"` | `skip`, `modify`, `replace`, or `reset` |
+| `strict_attributes` | `true` | Schema rejection stops import |
+| `import_system_accounts` | `false` | Leave off unless you intend it |
+| `allow_unverified_remote_capacity` | `false` | See disk checks |
+| `default_mailhost` | unset | Multi-mailbox destination |
+| `[import.mailhost_map]` | empty | Old hostname → new hostname |
+
+`strict_attributes = false` only after reviewing `reports/import-warnings.ndjson`.
+Service, connection, and timeout errors are never downgraded to attribute warnings.
+
+`[source]` / `[target]` may set `zimbra_user`, command/mailbox timeouts, and admin
+REST scheme/port. `mode = "ssh"` and SSH-related keys are rejected.
+
+Removed keys (`include_global_config`, `apply_global_config`, `server_map`, archive
+encryption keys, and similar) cause a configuration error; they are not ignored.
+
+`[source]` and `[target]` `command_timeout_seconds` default to 300;
+`mailbox_timeout_seconds` defaults to 14400.
 
 ## Reliability and security
 
-The archive uses SHA-256 checksums for provisioning records and mailbox payloads, atomic
-writes, `0600` files, a `0700` directory, and a required SQLite checkpoint database.
-Records and mailbox payloads are stored in plaintext. Worker submission and execution
-are bounded, and only classified transient command failures use limited exponential
-retries. Temporary mailbox chunks exist only under `export_data/.tmp` while being
-processed and are removed afterward. Sensitive `zmprov` values use stdin batch input
-instead of process arguments.
+The archive uses SHA-256 checksums for provisioning records and mailbox payloads,
+atomic writes, `0600` files, a `0700` directory, and a required SQLite checkpoint
+database. Records and mailbox payloads are stored in plaintext. Worker submission is
+bounded. Only classified transient failures use limited exponential retries.
+Temporary mailbox chunks live under `export_data/.tmp` and are removed afterward.
+Sensitive `zmprov` values use stdin batch input, not process arguments.
 
 The mailbox protocol follows Zimbra's
-[REST export/import reference](https://github.com/Zimbra/zm-mailbox/blob/develop/store/docs/rest.txt),
-and provisioning commands are checked against the installed utilities before use. The
+[REST export/import reference](https://github.com/Zimbra/zm-mailbox/blob/develop/store/docs/rest.txt).
+The
 [official command-line guide](https://github.com/Zimbra/adminguide/blob/develop/cmdlineutils.adoc)
 is the operational reference for `zmprov`, `zmmailbox`, and cache commands.
 
-Do not copy an archive while `zimigrate` is running. Keep the directory on trusted,
-preferably disk-encrypted storage. A copied archive contains account names, password
-hashes when secret export is enabled, mailbox content, and checkpoint metadata.
-See [SECURITY.md](SECURITY.md) for details.
+Keep the directory on trusted, preferably disk-encrypted storage. A copied archive
+contains account names, password hashes when secret export is enabled, mailbox
+content, and checkpoint metadata. See [SECURITY.md](SECURITY.md).
 
 ## Known boundaries
 
@@ -315,20 +584,14 @@ See [SECURITY.md](SECURITY.md) for details.
   folders and recreate grants when necessary.
 - Target verification compares provisioning state and successful mailbox REST import
   checkpoints; it does not perform an item-by-item mailbox content comparison.
-- A live source can change during export. Use a maintenance/freeze window for the final
-  run; mailbox REST export is not a cluster-wide transactional snapshot.
-- Import disk assessment uses each archive member's expanded size, not only its compressed
-  ZIP/TGZ size. In a multi-mailbox destination, paths on a remote mailbox host cannot be
-  measured through the local filesystem. Import rejects mapped remote hosts unless the
-  operator explicitly accepts that limitation after checking every mapped host.
-- Year-chunk mailbox export filters with Zimbra `DateQuery` numeric UTC epoch milliseconds
-  (`date:<` / `date:>=`), not locale `mm/dd/yyyy`. REST query export can omit empty folders
-  and items without a searchable date the same way Zimbra search does; `mailbox_mode = "full"`
-  is the most complete snapshot.
-- Destination version pinning is optional. By default any local Zimbra release that can
-  run `zmprov`/`zmmailbox`/`zmcontrol` is accepted; set
-  `import.expected_target_version_pattern` only when the operator wants to require a
-  specific `zmcontrol -v` string.
+- A live source can change during export. Use a maintenance/freeze window for the
+  final run; mailbox REST export is not a cluster-wide transactional snapshot.
+- Import disk assessment uses expanded archive-member size, not only compressed
+  ZIP/TGZ size. Mapped remote mailbox hosts are rejected unless the operator accepts
+  that limitation after checking every host.
+- Destination version pinning is optional. Any local Zimbra release that can run
+  `zmprov` / `zmmailbox` / `zmcontrol` is accepted unless
+  `import.expected_target_version_pattern` is set.
 
 ## Development
 

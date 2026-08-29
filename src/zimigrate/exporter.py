@@ -10,6 +10,11 @@ from zimigrate.attributes import exportable_attributes, first
 from zimigrate.capacity import assess_export_disk, format_bytes
 from zimigrate.config import AppConfig
 from zimigrate.data_source import decrypt_data_source_secrets
+from zimigrate.drain import (
+    export_drain_enabled,
+    mailbox_missing_after_drain,
+    request_mailbox_drain,
+)
 from zimigrate.errors import Interrupted, ZimigrateError
 from zimigrate.interrupt import WorkerPool, bounded_futures
 from zimigrate.models import Artifact, Attributes, EntityRecord
@@ -66,7 +71,7 @@ class Exporter:
         )
 
         LOGGER.info("Discovering source inventory")
-        if transfer.include_server_config or transfer.include_mailboxes:
+        if transfer.include_mailboxes:
             LOGGER.info("Listing source servers")
             servers = self.client.list_servers()
             LOGGER.info(
@@ -77,7 +82,6 @@ class Exporter:
             LOGGER.info("Reading source server attributes")
             server_attributes = {server: self.client.get_server(server) for server in servers}
         else:
-            servers = []
             server_attributes = {}
         if transfer.include_accounts:
             LOGGER.info("Listing calendar resources")
@@ -102,14 +106,6 @@ class Exporter:
             export_options=export_options,
         )
 
-        if transfer.include_global_config:
-            LOGGER.info("Exporting global configuration")
-            self._export_singleton(
-                "global_config",
-                "global",
-                self.client.get_global_config,
-                phase="export:global-config",
-            )
         if transfer.include_domains:
             LOGGER.info("Listing domains")
             domains = self._discover_domains()
@@ -148,12 +144,6 @@ class Exporter:
         else:
             distribution_lists = []
 
-        if transfer.include_server_config:
-            self._run_parallel(
-                "server",
-                servers,
-                lambda name: self._export_entity("server", name, lambda _: server_attributes[name]),
-            )
         self._run_parallel(
             "domain",
             domains,
@@ -233,6 +223,7 @@ class Exporter:
             mailbox_usage=mailbox_usage,
             include_mailboxes=self.config.transfer.include_mailboxes,
             workers=self.config.transfer.workers,
+            drain_completed_artifacts=export_drain_enabled(),
         )
         report_path = ensure_relative_path(self.archive.root, "reports/export-disk-assessment.json")
         atomic_json(report_path, assessment.as_dict())
@@ -276,8 +267,6 @@ class Exporter:
             "include_accounts": transfer.include_accounts,
             "include_mailboxes": transfer.include_mailboxes,
             "include_distribution_lists": transfer.include_distribution_lists,
-            "include_global_config": transfer.include_global_config,
-            "include_server_config": transfer.include_server_config,
             "include_system_mailboxes": transfer.include_system_mailboxes,
             "include_secrets": transfer.include_secrets,
             "account_include": list(transfer.account_include),
@@ -364,34 +353,6 @@ class Exporter:
                 f"{errors[0][0]}: {_error_summary(errors[0][1])}"
             )
         return results
-
-    def _export_singleton(
-        self,
-        kind: str,
-        name: str,
-        getter: object,
-        *,
-        phase: str,
-    ) -> None:
-        if self._valid_entity_checkpoint(phase, kind, name):
-            return
-        LOGGER.info(
-            "Exporting %s %s",
-            kind,
-            name,
-            extra=entity_start_fields(kind, name, action="export"),
-        )
-        self.archive.state.start(phase, name)
-        try:
-            attributes = getter()  # type: ignore[operator]
-            attributes = self._sanitize(attributes)
-            relative, checksum = self.archive.write_entity(
-                EntityRecord(kind=kind, name=name, attributes=attributes)
-            )
-            self.archive.state.succeed(phase, name, artifact_path=relative, checksum=checksum)
-        except Exception as exc:
-            self.archive.state.fail(phase, name, _error_summary(exc))
-            raise
 
     def _export_entity(self, kind: str, name: str, getter: object) -> None:
         phase = f"export:{kind}"
@@ -489,15 +450,11 @@ class Exporter:
                     if not isinstance(detail, dict):
                         raise ValueError("mailbox checkpoint is not an object")
                     artifact = Artifact.from_dict(detail)
-                    self.archive.validate_mailbox_artifact(
-                        artifact.path,
-                        artifact.sha256,
-                        deep=False,
-                        archive_format=artifact.archive_format,
-                        expected_size=artifact.size,
-                    )
-                    artifacts.append(artifact)
-                    continue
+                    if self._mailbox_artifact_reusable(artifact):
+                        artifacts.append(artifact)
+                        self._drain_mailbox_if_present(artifact)
+                        continue
+                    raise ValueError("mailbox artifact is not reusable")
                 except Exception:
                     LOGGER.warning(
                         "Checkpointed mailbox artifact is invalid; exporting it again",
@@ -516,6 +473,7 @@ class Exporter:
                 ensure_relative_path(self.archive.root, ".tmp"), f".{archive_format}"
             )
             os.close(descriptor)
+            stored: tuple[str, str, int] | None = None
             try:
                 self.client.export_mailbox(
                     account,
@@ -545,6 +503,7 @@ class Exporter:
                     detail=json.dumps(artifact.as_dict(), sort_keys=True),
                 )
                 artifacts.append(artifact)
+                stored = (relative, checksum, size)
                 LOGGER.info(
                     "Stored mailbox %s (%s)",
                     account,
@@ -556,6 +515,13 @@ class Exporter:
                 raise
             finally:
                 plaintext.unlink(missing_ok=True)
+            if stored is not None:
+                request_mailbox_drain(
+                    self.archive.root,
+                    relative=stored[0],
+                    sha256=stored[1],
+                    size=stored[2],
+                )
         return artifacts
 
     def _mailbox_queries(self) -> list[tuple[str, str]]:
@@ -664,6 +630,8 @@ class Exporter:
                 if state.artifact_path == self.archive.entity_relative_path(candidate, name)
             )
             for artifact in record.artifacts:
+                if mailbox_missing_after_drain(self.archive.root, artifact.path):
+                    continue
                 self.archive.validate_mailbox_artifact(
                     artifact.path,
                     artifact.sha256,
@@ -679,6 +647,30 @@ class Exporter:
             return False
         self._validated_entity_checkpoints.add(checkpoint_key)
         return True
+
+    def _mailbox_artifact_reusable(self, artifact: Artifact) -> bool:
+        if mailbox_missing_after_drain(self.archive.root, artifact.path):
+            return True
+        self.archive.validate_mailbox_artifact(
+            artifact.path,
+            artifact.sha256,
+            deep=False,
+            archive_format=artifact.archive_format,
+            expected_size=artifact.size,
+        )
+        return True
+
+    def _drain_mailbox_if_present(self, artifact: Artifact) -> None:
+        if not export_drain_enabled():
+            return
+        if mailbox_missing_after_drain(self.archive.root, artifact.path):
+            return
+        request_mailbox_drain(
+            self.archive.root,
+            relative=artifact.path,
+            sha256=artifact.sha256,
+            size=artifact.size,
+        )
 
     def _run_parallel(self, label: str, names: list[str], operation: object) -> None:
         progress = PhaseProgress(LOGGER, kind=label, total=len(names), action="export")
