@@ -1,0 +1,74 @@
+# The passphrase itself must never be stored in this file.
+[archive]
+encryption_enabled = true
+passphrase_env = "ZIMIGRATE_ARCHIVE_PASSPHRASE"
+allow_unencrypted = false
+
+# Configuration is optional. zimigrate always executes on the local Zimbra server.
+[source]
+zimbra_user = "zimbra"
+command_timeout_seconds = 300
+mailbox_timeout_seconds = 14400
+mailbox_admin_scheme = "https"
+mailbox_admin_port = 7071
+
+[target]
+zimbra_user = "zimbra"
+command_timeout_seconds = 300
+mailbox_timeout_seconds = 14400
+mailbox_admin_scheme = "https"
+mailbox_admin_port = 7071
+
+[transfer]
+workers = 4
+retries = 3
+retry_base_seconds = 1.0
+include_domains = true
+include_cos = true
+include_accounts = true
+include_mailboxes = true
+include_distribution_lists = true
+include_global_config = true
+include_server_config = true
+include_system_mailboxes = false
+include_secrets = true
+account_include = ["*"]
+account_exclude = []
+# Optional. Prefer CLI --user / --domain for one-account or one-domain backups.
+target_users = []
+target_domains = []
+
+# "full" is most complete. For very large mailboxes, "year-chunks" reduces the
+# blast radius of a broken archive at the cost of additional Zimbra REST requests.
+mailbox_mode = "full"
+# ZIP with meta=1 includes calendar, tasks, contacts, mail, and briefcase content.
+mailbox_format = "zip"
+mailbox_lock = true
+mailbox_start_year = 1970
+mailbox_chunk_years = 5
+
+[import]
+# Empty accepts any local Zimbra release that passes command preflight.
+# Set a regex only when the destination must match a specific version string.
+expected_target_version_pattern = ""
+existing_policy = "merge"
+mailbox_conflict_resolution = "skip"
+# Stop on an unsupported target attribute by default. Set false only after reviewing
+# reports/import-warnings.ndjson; infrastructure errors still stop the import.
+strict_attributes = true
+
+# Global and per-server settings are archived but disabled by default because
+# blindly copying topology-specific attributes can make the destination unusable.
+apply_global_config = false
+global_attribute_allowlist = []
+apply_server_config = false
+server_attribute_allowlist = []
+allow_sensitive_config = false
+import_system_accounts = false
+# default_mailhost = "new-zimbra.example.com"
+
+[import.server_map]
+# "old-zimbra.example.com" = "new-zimbra.example.com"
+
+[import.mailhost_map]
+# "old-mailbox-1.example.com" = "new-mailbox-1.example.com"
