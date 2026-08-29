@@ -59,6 +59,9 @@ apply_server_config = false
 server_attribute_allowlist = []
 allow_sensitive_config = false
 import_system_accounts = false
+# A local process cannot inspect remote mailbox/index volumes. Keep this false.
+# Set true only after independently checking every host named below.
+allow_unverified_remote_capacity = false
 # default_mailhost = "new-zimbra.example.com"
 
 [import.server_map]

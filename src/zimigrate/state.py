@@ -7,6 +7,7 @@ import weakref
 from dataclasses import dataclass
 from pathlib import Path
 
+from zimigrate.errors import ZimigrateError
 from zimigrate.util import utc_now
 
 
@@ -31,6 +32,14 @@ class StateStore:
         self._database = sqlite3.connect(
             path, timeout=30, isolation_level=None, check_same_thread=False
         )
+        try:
+            integrity = self._database.execute("PRAGMA quick_check").fetchone()
+        except sqlite3.DatabaseError as exc:
+            self._database.close()
+            raise ZimigrateError(f"Checkpoint database is corrupt: {path}") from exc
+        if integrity is None or integrity[0] != "ok":
+            self._database.close()
+            raise ZimigrateError(f"Checkpoint database is corrupt: {path}")
         # WAL + NORMAL keeps checkpoints crash-safe without fsync on every account.
         self._database.execute("PRAGMA journal_mode=WAL")
         self._database.execute("PRAGMA synchronous=NORMAL")
@@ -77,7 +86,8 @@ class StateStore:
                 VALUES (?, ?, 'running', 1, ?, NULL, NULL, NULL, NULL)
                 ON CONFLICT(phase, entity) DO UPDATE SET
                     status = 'running', attempts = operations.attempts + 1,
-                    started_at = excluded.started_at, finished_at = NULL, detail = NULL
+                    started_at = excluded.started_at, finished_at = NULL,
+                    artifact_path = NULL, checksum = NULL, detail = NULL
                 """,
                 (phase, entity, utc_now()),
             )
@@ -92,7 +102,7 @@ class StateStore:
         detail: str | None = None,
     ) -> None:
         with self._lock:
-            self._database.execute(
+            updated = self._database.execute(
                 """
                 UPDATE operations SET status = 'success', finished_at = ?,
                                       artifact_path = ?, checksum = ?, detail = ?
@@ -100,16 +110,20 @@ class StateStore:
                 """,
                 (utc_now(), artifact_path, checksum, detail, phase, entity),
             )
+            if updated.rowcount != 1:
+                raise ZimigrateError(f"Checkpoint was not started: {phase}/{entity}")
 
     def fail(self, phase: str, entity: str, error: str) -> None:
         with self._lock:
-            self._database.execute(
+            updated = self._database.execute(
                 """
                 UPDATE operations SET status = 'failed', finished_at = ?, detail = ?
                 WHERE phase = ? AND entity = ?
                 """,
                 (utc_now(), error[:4000], phase, entity),
             )
+            if updated.rowcount != 1:
+                raise ZimigrateError(f"Checkpoint was not started: {phase}/{entity}")
 
     def summary(self) -> list[dict[str, object]]:
         with self._lock:

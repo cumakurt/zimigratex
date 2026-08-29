@@ -24,11 +24,20 @@ are additionally blocked unless `allow_sensitive_config = true`; enabling it req
 manual security and topology review.
 
 Mailbox payloads and provisioning records are checksummed with SHA-256. `manifest.json`
-is the archive inventory. Preserve all files during transfer. Encrypted archives from
+is the archive inventory and `state.sqlite3` binds each provisioning record to its
+digest; both are required. Validation rejects missing, changed, duplicate, or
+unreferenced artifacts before import. Preserve the complete directory during transfer.
+These digests detect accidental corruption but are not a cryptographic signature against
+an attacker who can rewrite the archive and checkpoint database. Encrypted archives from
 older zimigrate builds (`.zmenc`, `salt.bin`, `.keycheck`) are rejected.
 
 Zimbra stores data-source credential fields with a legacy, data-source-ID-bound
 encoding. When secret export is enabled, zimigrate decrypts those fields in memory so
 the target can encrypt them against its newly assigned data-source IDs. The compatibility
 path is decrypt-only; plaintext values are written into the local archive and are
-redacted from command diagnostics.
+redacted from command diagnostics. On import, each destination data source remains
+disabled until all stored settings and credentials have been applied.
+
+Mapped remote mailbox hosts are rejected by default because their volume free space is
+not visible to the local process. `allow_unverified_remote_capacity = true` records an
+explicit operational exception; check every remote message and index volume first.

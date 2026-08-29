@@ -272,17 +272,6 @@ RCON = (0x00, 0x01, 0x02, 0x04, 0x08, 0x10, 0x20, 0x40, 0x80, 0x1B, 0x36)
 BLOCK_SIZE = 16
 
 
-def aes128_ecb_encrypt(key: bytes, plaintext: bytes) -> bytes:
-    if len(key) != BLOCK_SIZE:
-        raise ValueError("AES-128 key must be 16 bytes")
-    padded = pkcs7_pad(plaintext)
-    round_keys = _expand_key(key)
-    return b"".join(
-        _encrypt_block(padded[index : index + BLOCK_SIZE], round_keys)
-        for index in range(0, len(padded), BLOCK_SIZE)
-    )
-
-
 def aes128_ecb_decrypt(key: bytes, ciphertext: bytes) -> bytes:
     if len(key) != BLOCK_SIZE:
         raise ValueError("AES-128 key must be 16 bytes")
@@ -294,11 +283,6 @@ def aes128_ecb_decrypt(key: bytes, ciphertext: bytes) -> bytes:
         for index in range(0, len(ciphertext), BLOCK_SIZE)
     )
     return pkcs7_unpad(padded)
-
-
-def pkcs7_pad(data: bytes, block_size: int = BLOCK_SIZE) -> bytes:
-    padding = block_size - (len(data) % block_size)
-    return data + bytes([padding]) * padding
 
 
 def pkcs7_unpad(data: bytes, block_size: int = BLOCK_SIZE) -> bytes:
@@ -324,15 +308,6 @@ def _expand_key(key: bytes) -> list[bytes]:
     return [b"".join(words[index : index + 4]) for index in range(0, 44, 4)]
 
 
-def _encrypt_block(block: bytes, round_keys: list[bytes]) -> bytes:
-    state = _xor(block, round_keys[0])
-    for round_key in round_keys[1:-1]:
-        state = _mix_columns(_shift_rows(bytes(SBOX[byte] for byte in state)))
-        state = _xor(state, round_key)
-    state = _shift_rows(bytes(SBOX[byte] for byte in state))
-    return _xor(state, round_keys[-1])
-
-
 def _decrypt_block(block: bytes, round_keys: list[bytes]) -> bytes:
     state = _xor(block, round_keys[-1])
     state = bytes(INV_SBOX[byte] for byte in _inv_shift_rows(state))
@@ -341,29 +316,6 @@ def _decrypt_block(block: bytes, round_keys: list[bytes]) -> bytes:
         state = _inv_mix_columns(state)
         state = bytes(INV_SBOX[byte] for byte in _inv_shift_rows(state))
     return _xor(state, round_keys[0])
-
-
-def _shift_rows(state: bytes) -> bytes:
-    return bytes(
-        (
-            state[0],
-            state[5],
-            state[10],
-            state[15],
-            state[4],
-            state[9],
-            state[14],
-            state[3],
-            state[8],
-            state[13],
-            state[2],
-            state[7],
-            state[12],
-            state[1],
-            state[6],
-            state[11],
-        )
-    )
 
 
 def _inv_shift_rows(state: bytes) -> bytes:
@@ -389,24 +341,8 @@ def _inv_shift_rows(state: bytes) -> bytes:
     )
 
 
-def _mix_columns(state: bytes) -> bytes:
-    return b"".join(_mix_column(state[index : index + 4]) for index in range(0, BLOCK_SIZE, 4))
-
-
 def _inv_mix_columns(state: bytes) -> bytes:
     return b"".join(_inv_mix_column(state[index : index + 4]) for index in range(0, BLOCK_SIZE, 4))
-
-
-def _mix_column(column: bytes) -> bytes:
-    a, b, c, d = column
-    return bytes(
-        (
-            _gmul(a, 2) ^ _gmul(b, 3) ^ c ^ d,
-            a ^ _gmul(b, 2) ^ _gmul(c, 3) ^ d,
-            a ^ b ^ _gmul(c, 2) ^ _gmul(d, 3),
-            _gmul(a, 3) ^ b ^ c ^ _gmul(d, 2),
-        )
-    )
 
 
 def _inv_mix_column(column: bytes) -> bytes:

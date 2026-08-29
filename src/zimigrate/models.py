@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from typing import Any
 
 Attributes = dict[str, list[str]]
+ATTRIBUTE_NAME = re.compile(r"^[A-Za-z][A-Za-z0-9._-]*$")
 
 
 @dataclass(slots=True)
@@ -18,11 +20,9 @@ class Artifact:
     label: str
     path: str
     sha256: str
-    plaintext_sha256: str
     size: int
     query: str
     archive_format: str = "tgz"
-    encrypted: bool = False
     unpacked_size: int = 0
 
     def as_dict(self) -> dict[str, Any]:
@@ -30,19 +30,19 @@ class Artifact:
             "label": self.label,
             "path": self.path,
             "sha256": self.sha256,
-            "plaintext_sha256": self.plaintext_sha256,
             "size": self.size,
             "query": self.query,
             "archive_format": self.archive_format,
-            "encrypted": self.encrypted,
             "unpacked_size": self.unpacked_size,
         }
 
     @classmethod
     def from_dict(cls, value: dict[str, Any]) -> Artifact:
-        required_strings = ("label", "path", "sha256", "plaintext_sha256", "query")
+        required_strings = ("label", "path", "sha256", "query")
         if any(not isinstance(value.get(name), str) for name in required_strings):
             raise ValueError("mailbox artifact has an invalid string field")
+        if any(not value[name] or "\x00" in value[name] for name in ("label", "path", "query")):
+            raise ValueError("mailbox artifact has an empty or unsafe string field")
         size = value.get("size")
         unpacked_size = value.get("unpacked_size", 0)
         if not isinstance(size, int) or isinstance(size, bool) or size < 0:
@@ -54,28 +54,30 @@ class Artifact:
         ):
             raise ValueError("mailbox artifact unpacked size is invalid")
         archive_format = value.get("archive_format", "tgz")
-        encrypted = value.get("encrypted", False)
         if archive_format not in {"zip", "tgz"}:
             raise ValueError("mailbox artifact format is unsupported")
+        encrypted = value.get("encrypted", False)
         if not isinstance(encrypted, bool):
             raise ValueError("mailbox artifact encryption marker is invalid")
         if encrypted:
             raise ValueError("encrypted mailbox artifacts are not supported")
-        for checksum_name in ("sha256", "plaintext_sha256"):
-            checksum = value[checksum_name]
-            if len(checksum) != 64 or any(
-                character not in "0123456789abcdef" for character in checksum
-            ):
-                raise ValueError(f"mailbox artifact {checksum_name} is invalid")
+        checksum = value["sha256"]
+        if len(checksum) != 64 or any(
+            character not in "0123456789abcdef" for character in checksum
+        ):
+            raise ValueError("mailbox artifact sha256 is invalid")
+        # Schema v1 briefly wrote encryption-era fields even though the payload
+        # was plaintext. Accept those archives only when both digests agree.
+        plaintext_checksum = value.get("plaintext_sha256", checksum)
+        if not isinstance(plaintext_checksum, str) or plaintext_checksum != checksum:
+            raise ValueError("encrypted mailbox artifacts are not supported")
         return cls(
             label=value["label"],
             path=value["path"],
             sha256=value["sha256"],
-            plaintext_sha256=value["plaintext_sha256"],
             size=size,
             query=value["query"],
             archive_format=archive_format,
-            encrypted=encrypted,
             unpacked_size=unpacked_size,
         )
 
@@ -115,9 +117,11 @@ class EntityRecord:
         source_id = value.get("source_id")
         if not isinstance(kind, str) or not kind:
             raise ValueError("archive entity kind is invalid")
-        if not isinstance(name, str) or not name:
+        if not isinstance(name, str) or not name or _has_control_character(name):
             raise ValueError("archive entity name is invalid")
-        if source_id is not None and not isinstance(source_id, str):
+        if source_id is not None and (
+            not isinstance(source_id, str) or not source_id or _has_control_character(source_id)
+        ):
             raise ValueError("archive entity source ID is invalid")
         return cls(
             kind=kind,
@@ -138,16 +142,22 @@ def _attributes(value: object) -> Attributes:
         raise ValueError("archive attributes are not an object")
     result: Attributes = {}
     for key, values in value.items():
-        if not isinstance(key, str) or not isinstance(values, list):
+        if (
+            not isinstance(key, str)
+            or not ATTRIBUTE_NAME.fullmatch(key)
+            or not isinstance(values, list)
+        ):
             raise ValueError("archive attribute has an invalid shape")
-        if any(not isinstance(item, str) for item in values):
+        if any(not isinstance(item, str) or "\x00" in item for item in values):
             raise ValueError("archive attribute contains a non-string value")
         result[key] = list(values)
     return result
 
 
 def _strings(value: object, label: str) -> list[str]:
-    if not isinstance(value, list) or any(not isinstance(item, str) for item in value):
+    if not isinstance(value, list) or any(
+        not isinstance(item, str) or _has_control_character(item) for item in value
+    ):
         raise ValueError(f"archive entity {label} are invalid")
     return list(value)
 
@@ -156,3 +166,7 @@ def _dicts(value: object) -> list[dict[str, Any]]:
     if not isinstance(value, list) or any(not isinstance(item, dict) for item in value):
         raise ValueError("archive entity sections are invalid")
     return value
+
+
+def _has_control_character(value: str) -> bool:
+    return any(ord(character) < 32 or ord(character) == 127 for character in value)

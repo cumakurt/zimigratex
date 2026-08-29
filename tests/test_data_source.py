@@ -1,10 +1,7 @@
 from __future__ import annotations
 
-import base64
-import hashlib
 import unittest
 
-from zimigrate.aes import aes128_ecb_encrypt
 from zimigrate.data_source import decrypt_data_source_secrets
 from zimigrate.errors import ArchiveError
 
@@ -12,7 +9,7 @@ from zimigrate.errors import ArchiveError
 class DataSourceSecretTests(unittest.TestCase):
     def test_zimbra_credential_encoding_is_decrypted_with_its_data_source_id(self) -> None:
         data_source_id = "79d2c81e-8a3b-4b0a-b58d-2f981103eaab"
-        encrypted = _zimbra_encrypt("pässword-value", data_source_id)
+        encrypted = "AQABAgMEBQYHCAkKCwwNDg/zVnZc7+MThYWfUuadiETf"
 
         result = decrypt_data_source_secrets(
             {
@@ -25,8 +22,22 @@ class DataSourceSecretTests(unittest.TestCase):
         self.assertEqual(result["zimbraDataSourcePassword"], ["pässword-value"])
         self.assertEqual(result["zimbraDataSourceName"], ["external"])
 
+    def test_chunked_ldap_base64_credentials_are_decrypted(self) -> None:
+        data_source_id = "79d2c81e-8a3b-4b0a-b58d-2f981103eaab"
+        encrypted = "AQABAgMEBQYHCAkKCwwNDg8nDbrrhN+rZEyeGLs+X5RW"
+        wrapped = "\n".join(encrypted[index : index + 16] for index in range(0, len(encrypted), 16))
+
+        result = decrypt_data_source_secrets(
+            {
+                "zimbraDataSourceId": [data_source_id],
+                "zimbraDataSourcePassword": [wrapped],
+            }
+        )
+
+        self.assertEqual(result["zimbraDataSourcePassword"], ["secret"])
+
     def test_wrong_data_source_id_is_rejected(self) -> None:
-        encrypted = _zimbra_encrypt("secret", "source-id")
+        encrypted = "AQABAgMEBQYHCAkKCwwNDg8okvDWGqWeRBU8+ZJEe8Lo"
 
         with self.assertRaises(ArchiveError):
             decrypt_data_source_secrets(
@@ -35,13 +46,6 @@ class DataSourceSecretTests(unittest.TestCase):
                     "zimbraDataSourcePassword": [encrypted],
                 }
             )
-
-
-def _zimbra_encrypt(value: str, data_source_id: str) -> str:
-    salt = bytes(range(16))
-    key = hashlib.md5(salt + data_source_id.encode("utf-8"), usedforsecurity=False).digest()
-    ciphertext = aes128_ecb_encrypt(key, value.encode("utf-8"))
-    return base64.b64encode(bytes([1]) + salt + ciphertext).decode("ascii")
 
 
 if __name__ == "__main__":

@@ -15,6 +15,7 @@ from typing import Any, BinaryIO
 from zimigrate.errors import ArchiveError
 
 HASH_IO_SIZE = 8 * 1024 * 1024
+DNS_LABEL = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?$")
 
 
 def utc_now() -> str:
@@ -36,6 +37,16 @@ def safe_entity_filename(name: str) -> str:
     readable = re.sub(r"[^A-Za-z0-9._-]+", "_", name).strip("._-")[:72] or "entity"
     suffix = hashlib.sha256(name.encode("utf-8")).hexdigest()[:16]
     return f"{readable}-{suffix}"
+
+
+def is_valid_dns_name(value: str) -> bool:
+    """Return whether value is an ASCII DNS name accepted by Zimbra host fields."""
+    return bool(
+        value
+        and len(value) <= 253
+        and not value.endswith(".")
+        and all(DNS_LABEL.fullmatch(label) for label in value.split("."))
+    )
 
 
 def ensure_relative_path(root: Path, relative: str) -> Path:

@@ -9,12 +9,12 @@ from dataclasses import dataclass, replace
 from fnmatch import fnmatchcase
 
 from zimigrate.config import TransferConfig
-from zimigrate.errors import ConfigurationError
+from zimigrate.errors import ConfigurationError, ZimigrateError
 from zimigrate.models import EntityRecord
 from zimigrate.selection import transfer_with_categories
+from zimigrate.util import is_valid_dns_name
 
 USER_PATTERN = re.compile(r"^[^@\s]+@[^@\s]+$")
-DOMAIN_PATTERN = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9.-]{0,251}[A-Za-z0-9])?$")
 
 
 @dataclass(frozen=True, slots=True)
@@ -221,8 +221,16 @@ def parse_bound_scope(detail: str | None) -> TargetScope:
         return TargetScope()
     try:
         payload = json.loads(detail)
-    except json.JSONDecodeError:
-        return TargetScope()
+    except json.JSONDecodeError as exc:
+        raise ZimigrateError(
+            "Import checkpoint scope is not valid JSON; "
+            "use a copied archive with a fresh state database"
+        ) from exc
+    if not isinstance(payload, dict):
+        raise ZimigrateError(
+            "Import checkpoint scope is not a JSON object; "
+            "use a copied archive with a fresh state database"
+        )
     return scope_from_mapping(payload)
 
 
@@ -240,7 +248,7 @@ def _parse_domains(values: list[str]) -> list[str]:
     domains: list[str] = []
     for value in values:
         folded = value.casefold().removeprefix("@")
-        if USER_PATTERN.fullmatch(folded) or not DOMAIN_PATTERN.fullmatch(folded):
+        if USER_PATTERN.fullmatch(folded) or not is_valid_dns_name(folded):
             raise ConfigurationError(f"Invalid --domain value: {value}")
         domains.append(folded)
     return domains

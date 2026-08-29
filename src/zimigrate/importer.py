@@ -11,6 +11,7 @@ from pathlib import Path
 from zimigrate.archive import MigrationArchive
 from zimigrate.attributes import (
     SENSITIVE_ATTRIBUTE,
+    SIGNATURE_REFERENCE_ATTRIBUTES,
     apply_attributes_resiliently,
     first,
     flatten_operations,
@@ -33,21 +34,10 @@ from zimigrate.scope import (
 )
 from zimigrate.state import StateRecord
 from zimigrate.util import atomic_json, ensure_relative_path, utc_now
-from zimigrate.zimbra import ZimbraClient
+from zimigrate.zimbra import ZIMBRA_INBOX_FOLDER_ID, ZimbraClient, required_import_commands
 
 LOGGER = logging.getLogger(__name__)
 
-SIGNATURE_REFERENCE_ATTRIBUTES = {
-    "zimbraPrefDefaultSignatureId",
-    "zimbraPrefForwardReplySignatureId",
-    "zimbraPrefMailSignatureContactId",
-    "zimbraPrefCalendarAutoAcceptSignatureId",
-    "zimbraPrefCalendarAutoDeclineSignatureId",
-    "zimbraPrefCalendarAutoDenySignatureId",
-    "zimbraPrefCalendarAcceptSignatureId",
-    "zimbraPrefCalendarTentativeSignatureId",
-    "zimbraPrefCalendarDeclineSignatureId",
-}
 ZIMBRA_ID = re.compile(
     r"(?<![0-9A-Fa-f])"
     r"[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-"
@@ -87,12 +77,19 @@ class Importer:
             ensure_relative_path(archive.root, "reports/import-warnings.ndjson")
         )
         self._skipped_distribution_lists: set[str] = set()
+        self._destination_attributes: dict[tuple[str, str], Attributes] = {}
+        self._destination_attributes_lock = threading.Lock()
 
     def run(self) -> dict[str, int]:
         manifest = self.archive.manifest()
         if not manifest.get("completed"):
             raise ZimigrateError("The export is incomplete; resume export before importing")
-        version = self.client.preflight(require_mailbox=self.config.transfer.include_mailboxes)
+        transfer = self.config.transfer
+        version = self.client.preflight(
+            require_mailbox=transfer.include_mailboxes,
+            required_provisioning_commands=required_import_commands(transfer),
+            required_mailbox_commands={"postRestURL"} if transfer.include_mailboxes else set(),
+        )
         if not self.config.import_options.allows_version(version):
             raise CompatibilityError(
                 f"Target version '{version}' does not match required pattern "
@@ -101,7 +98,6 @@ class Importer:
         LOGGER.info("Target preflight passed", extra={"event": "preflight", "version": version})
         self._apply_resolved_scope()
 
-        transfer = self.config.transfer
         LOGGER.info("Loading archived records")
         cos_records = list(self.archive.iter_entities("cos")) if transfer.include_cos else []
         domain_records = (
@@ -156,10 +152,10 @@ class Importer:
             },
         )
 
-        LOGGER.info("Checking import disk capacity")
-        self._check_import_capacity(account_records)
         LOGGER.info("Validating destination mailhosts")
         self._validate_target_mailhosts()
+        LOGGER.info("Checking import disk capacity")
+        self._check_import_capacity(account_records)
         self._bind_import_options()
 
         LOGGER.info("Importing classes of service")
@@ -210,6 +206,30 @@ class Importer:
 
     def _check_import_capacity(self, account_records: list[EntityRecord]) -> None:
         transfer = self.config.transfer
+        options = self.config.import_options
+        configured_mailhosts = (
+            set(options.mailhost_map.values()) if transfer.include_accounts else set()
+        )
+        if transfer.include_accounts and options.default_mailhost:
+            configured_mailhosts.add(options.default_mailhost)
+        remote_mailhosts: list[str] = []
+        if configured_mailhosts:
+            local_mailhost = self.client.hostname().casefold()
+            remote_mailhosts = sorted(
+                host for host in configured_mailhosts if host.casefold() != local_mailhost
+            )
+        if remote_mailhosts and not options.allow_unverified_remote_capacity:
+            raise ZimigrateError(
+                "Free space cannot be measured on configured remote mailbox host "
+                f"{remote_mailhosts[0]}; run the import on that mailbox host or set "
+                "import.allow_unverified_remote_capacity=true only after verifying every "
+                "remote message and index volume"
+            )
+        if remote_mailhosts:
+            LOGGER.warning(
+                "Remote mailbox volume capacity was explicitly accepted without local measurement",
+                extra={"remote_mailhosts": remote_mailhosts},
+            )
         completed_accounts = self.archive.state.successful_entities("import:account-complete")
         completed_mailboxes = self.archive.state.successful_entities("import:mailbox")
         remaining_sizes = (
@@ -239,10 +259,29 @@ class Importer:
         )
         report_path = ensure_relative_path(self.archive.root, "reports/import-disk-assessment.json")
         atomic_json(report_path, assessment.as_dict())
+        limiting_filesystem = min(
+            assessment.filesystems,
+            key=lambda filesystem: filesystem.free_bytes - filesystem.estimated_required_free_bytes,
+        )
+        log_fields = {
+            "status": assessment.status,
+            "free": format_bytes(limiting_filesystem.free_bytes),
+            "required": format_bytes(limiting_filesystem.estimated_required_free_bytes),
+            "mailbox_bytes": format_bytes(assessment.mailbox_artifact_bytes),
+            "report": report_path,
+            "filesystems": [
+                {
+                    "path": filesystem.path,
+                    "free": format_bytes(filesystem.free_bytes),
+                    "required": format_bytes(filesystem.estimated_required_free_bytes),
+                }
+                for filesystem in assessment.filesystems
+            ],
+        }
         if assessment.status == "insufficient":
             LOGGER.error(
                 "Import disk capacity is insufficient",
-                extra={"report": report_path},
+                extra=log_fields,
             )
             details = "; ".join(
                 f"{filesystem.path}: {format_bytes(filesystem.free_bytes)} available, "
@@ -256,19 +295,7 @@ class Importer:
             "Import disk capacity check passed"
             if assessment.status == "sufficient"
             else "Import disk capacity is close to the safe limit",
-            extra={
-                "status": assessment.status,
-                "mailbox_bytes": format_bytes(assessment.mailbox_artifact_bytes),
-                "report": report_path,
-                "filesystems": [
-                    {
-                        "path": filesystem.path,
-                        "free": format_bytes(filesystem.free_bytes),
-                        "required": format_bytes(filesystem.estimated_required_free_bytes),
-                    }
-                    for filesystem in assessment.filesystems
-                ],
-            },
+            extra=log_fields,
         )
 
     def _import_cos(self, records: list[EntityRecord]) -> dict[str, str]:
@@ -281,7 +308,7 @@ class Importer:
                 extra=entity_start_fields("cos", record.name, action="import"),
             )
             self._import_basic_entity(record)
-            destination = self.client.get_cos(record.name)
+            destination = self._destination_object_attributes("cos", record.name)
             destination_id = first(destination, "zimbraId")
             if record.source_id and destination_id:
                 mapping[record.source_id] = destination_id
@@ -359,7 +386,8 @@ class Importer:
             state = self.archive.state.get(phase, record.name)
             return not (state and state.detail == "skipped-existing")
         prior = self.archive.state.get(phase, record.name)
-        exists = self.client.exists("domain", record.name)
+        existing_attributes = self._existing_destination_attributes(record.kind, record.name)
+        exists = existing_attributes is not None
         decision = self._existing_object_decision(exists=exists, prior=prior, label=record.name)
         if decision == "skip":
             self.archive.state.start(phase, record.name)
@@ -369,6 +397,7 @@ class Importer:
         try:
             if decision == "create":
                 self.client.create_alias_domain(record.name, target_name)
+                self._forget_destination_attributes("domain", record.name)
                 if not first(record.attributes, "zimbraMailCatchAllForwardingAddress"):
                     self._apply(
                         "domain",
@@ -396,7 +425,8 @@ class Importer:
             state = self.archive.state.get(phase, record.name)
             return not (state and state.detail == "skipped-existing")
         prior = self.archive.state.get(phase, record.name)
-        exists = self.client.exists(record.kind, record.name)
+        existing_attributes = self._existing_destination_attributes(record.kind, record.name)
+        exists = existing_attributes is not None
         decision = self._existing_object_decision(
             exists=exists, prior=prior, label=f"{record.kind} {record.name}"
         )
@@ -428,6 +458,9 @@ class Importer:
                     record.name,
                     flatten_operations(list(initial_attributes.items())),
                 )
+                self._forget_destination_attributes(record.kind, record.name)
+            elif existing_attributes is not None:
+                self._warn_if_existing_mailhost_differs(record, existing_attributes)
             attributes = mutable_attributes(record.kind, record.attributes)
             self._apply(record.kind, record.name, attributes)
             self.archive.state.succeed(
@@ -443,6 +476,10 @@ class Importer:
     def _import_account(self, record: EntityRecord, cos_mapping: dict[str, str]) -> None:
         phase = "import:account-complete"
         if self.archive.state.is_success(phase, record.name):
+            state = self.archive.state.get(phase, record.name)
+            if state and state.detail == "pending-activation":
+                self._activate_imported_account(record)
+                self.archive.state.succeed(phase, record.name)
             return
         LOGGER.info(
             "Importing account %s",
@@ -459,9 +496,7 @@ class Importer:
                 self.archive.state.succeed(phase, record.name, detail="skipped-existing")
                 return
 
-            # Reassert maintenance on every incomplete attempt, including merges and
-            # the narrow crash window after a previous attempt restored the final
-            # status but before it committed the account-complete checkpoint.
+            # Reassert maintenance on every incomplete attempt, including merges.
             self._apply(record.kind, record.name, {"zimbraAccountStatus": ["maintenance"]})
 
             source_cos = first(record.attributes, "zimbraCOSId")
@@ -481,23 +516,110 @@ class Importer:
             self._import_data_sources(record)
             self._apply_signature_references(record, signature_mapping)
 
-            status = first(record.attributes, "zimbraAccountStatus", "active") or "active"
-            self._apply(record.kind, record.name, {"zimbraAccountStatus": [status]})
-            self._flush_account_cache(record)
+            # Commit before making the account loginable so a crash cannot leave
+            # an active mailbox without an account-complete checkpoint.
+            self.archive.state.succeed(phase, record.name, detail="pending-activation")
+            self._activate_imported_account(record)
             self.archive.state.succeed(phase, record.name)
         except Exception as exc:
             self.archive.state.fail(phase, record.name, _error_summary(exc))
             raise
 
+    def _activate_imported_account(self, record: EntityRecord) -> None:
+        status = first(record.attributes, "zimbraAccountStatus", "active") or "active"
+        self._apply(record.kind, record.name, {"zimbraAccountStatus": [status]})
+        try:
+            self._flush_account_cache(record)
+        except Exception as activation_error:
+            # Keep an incompletely activated account unavailable in LDAP. The
+            # enclosing checkpoint remains failed and the next run resumes it.
+            try:
+                self._apply(
+                    record.kind,
+                    record.name,
+                    {"zimbraAccountStatus": ["maintenance"]},
+                )
+            except Exception as rollback_error:
+                raise ZimigrateError(
+                    f"Account activation failed and {record.name} could not be returned "
+                    "to maintenance"
+                ) from rollback_error
+            raise activation_error
+
+    def _warn_if_existing_mailhost_differs(
+        self, record: EntityRecord, existing_attributes: Attributes
+    ) -> None:
+        if record.kind not in {"account", "calendar_resource"}:
+            return
+        source_mailhost = first(record.attributes, "zimbraMailHost")
+        desired = self.config.import_options.mailhost_map.get(
+            source_mailhost or "",
+            self.config.import_options.default_mailhost,
+        )
+        current = first(existing_attributes, "zimbraMailHost")
+        if desired and current and desired.casefold() != current.casefold():
+            self.warnings.write(
+                record.name,
+                "zimbraMailHost",
+                "existing mailbox host was kept; LDAP remapping requires a mailbox move",
+            )
+
     def _destination_account_attributes(self, record: EntityRecord) -> Attributes:
-        if record.kind == "calendar_resource":
-            return self.client.get_calendar_resource(record.name)
-        return self.client.get_account(record.name)
+        return self._destination_object_attributes(record.kind, record.name)
+
+    def _existing_destination_attributes(self, kind: str, name: str) -> Attributes | None:
+        key = (kind, name)
+        with self._destination_attributes_lock:
+            cached = self._destination_attributes.get(key)
+            if cached is not None:
+                return cached
+        optional = getattr(self.client, "get_optional", None)
+        if callable(optional):
+            attributes = optional(kind, name)
+        elif self.client.exists(kind, name):
+            attributes = self._load_destination_attributes(kind, name)
+        else:
+            attributes = None
+        with self._destination_attributes_lock:
+            cached = self._destination_attributes.get(key)
+            if cached is not None:
+                return cached
+            if attributes is not None:
+                self._destination_attributes[key] = attributes
+            return attributes
+
+    def _destination_object_attributes(self, kind: str, name: str) -> Attributes:
+        existing = self._existing_destination_attributes(kind, name)
+        if existing is not None:
+            return existing
+        attributes = self._load_destination_attributes(kind, name)
+        with self._destination_attributes_lock:
+            self._destination_attributes[(kind, name)] = attributes
+        return attributes
+
+    def _forget_destination_attributes(self, kind: str, name: str) -> None:
+        with self._destination_attributes_lock:
+            self._destination_attributes.pop((kind, name), None)
+
+    def _load_destination_attributes(self, kind: str, name: str) -> Attributes:
+        if kind == "cos":
+            return self.client.get_cos(name)
+        if kind == "domain":
+            return self.client.get_domain(name)
+        if kind == "calendar_resource":
+            return self.client.get_calendar_resource(name)
+        if kind == "account":
+            return self.client.get_account(name)
+        if kind == "server":
+            return self.client.get_server(name)
+        return self.client.get_distribution_list(name)
 
     def _flush_account_cache(self, record: EntityRecord) -> None:
         # LDAP-direct userPassword and status writes are invisible to mailboxd
-        # until flushCache or ldap_cache_account_maxage.
-        self.client.flush_cache("account", record.name)
+        # until flushCache or ldap_cache_account_maxage. Flush the account's
+        # mailbox host first; cache is per mailboxd, not global LDAP.
+        mailbox_host = first(self._destination_account_attributes(record), "zimbraMailHost")
+        self.client.flush_cache("account", record.name, server=mailbox_host)
 
     def _import_account_aliases(self, record: EntityRecord, current: Attributes) -> None:
         existing = set(current.get("zimbraMailAlias", []))
@@ -521,6 +643,7 @@ class Importer:
                     artifact.sha256,
                     deep=False,
                     archive_format=artifact.archive_format,
+                    expected_size=artifact.size,
                 )
                 LOGGER.info(
                     "Importing mailbox %s (%s)",
@@ -530,8 +653,6 @@ class Importer:
                         "account", f"{record.name} ({artifact.label})", action="import"
                     ),
                 )
-                if artifact.plaintext_sha256 != artifact.sha256:
-                    raise ZimigrateError(f"Plaintext mailbox checksum mismatch: {artifact.path}")
                 resolution = (
                     "skip"
                     if configured_resolution == "reset" and index > 0
@@ -617,22 +738,38 @@ class Importer:
                     record.name, "data_source", "data source name or type is unavailable"
                 )
                 continue
+            source_enabled = first(attributes, "zimbraDataSourceEnabled", "FALSE") or "FALSE"
             if name not in existing:
                 self.client.create_data_source(
                     record.name,
                     source_type,
                     name,
-                    first(attributes, "zimbraDataSourceEnabled", "FALSE") or "FALSE",
-                    first(attributes, "zimbraDataSourceFolderId", "2") or "2",
+                    "FALSE",
+                    first(attributes, "zimbraDataSourceFolderId", ZIMBRA_INBOX_FOLDER_ID)
+                    or ZIMBRA_INBOX_FOLDER_ID,
                 )
                 existing.add(name)
+            else:
+                self.client.modify_data_source(
+                    record.name,
+                    name,
+                    ["zimbraDataSourceEnabled", "FALSE"],
+                    sensitive=False,
+                )
             mutable = mutable_attributes("data_source", attributes)
+            mutable.pop("zimbraDataSourceEnabled", None)
             self._apply_custom(
                 f"{record.name}/data-source/{name}",
                 mutable,
                 lambda operations, sensitive, name=name: self.client.modify_data_source(
                     record.name, name, operations, sensitive=sensitive
                 ),
+            )
+            self.client.modify_data_source(
+                record.name,
+                name,
+                ["zimbraDataSourceEnabled", source_enabled],
+                sensitive=False,
             )
 
     def _apply_signature_references(
@@ -660,7 +797,7 @@ class Importer:
                 self._skipped_distribution_lists.add(record.name)
                 progress.complete(record.name)
                 continue
-            current = self.client.get_distribution_list(record.name)
+            current = self._destination_object_attributes(record.kind, record.name)
             existing_aliases = set(current.get("zimbraMailAlias", []))
             for alias in record.aliases:
                 if alias not in existing_aliases:
@@ -695,16 +832,7 @@ class Importer:
             complete = self.archive.state.get("import:account-complete", record.name)
             if complete and complete.detail == "skipped-system-account":
                 continue
-            if record.kind == "cos":
-                attributes = self.client.get_cos(record.name)
-            elif record.kind == "domain":
-                attributes = self.client.get_domain(record.name)
-            elif record.kind == "calendar_resource":
-                attributes = self.client.get_calendar_resource(record.name)
-            elif record.kind == "account":
-                attributes = self.client.get_account(record.name)
-            else:
-                attributes = self.client.get_distribution_list(record.name)
+            attributes = self._destination_object_attributes(record.kind, record.name)
             if destination_id := first(attributes, "zimbraId"):
                 mapping[record.source_id] = destination_id
         return mapping
@@ -844,6 +972,8 @@ class Importer:
                     raise
 
     def _validate_target_mailhosts(self) -> None:
+        if not self.config.transfer.include_accounts:
+            return
         options = self.config.import_options
         destinations = set(options.mailhost_map.values())
         if options.default_mailhost:
@@ -868,6 +998,7 @@ class Importer:
                 "default_mailhost": options.default_mailhost,
                 "import_system_accounts": options.import_system_accounts,
                 "allow_sensitive_config": options.allow_sensitive_config,
+                "allow_unverified_remote_capacity": (options.allow_unverified_remote_capacity),
                 "include_domains": self.config.transfer.include_domains,
                 "include_cos": self.config.transfer.include_cos,
                 "include_accounts": self.config.transfer.include_accounts,
@@ -884,10 +1015,6 @@ class Importer:
         phase = "import:configuration"
         state = self.archive.state.get(phase, "options")
         if state and state.status == "success" and not _same_import_bind(state.detail, value):
-            raise ZimigrateError(
-                "Import options differ from the existing checkpoints; "
-                "use a copied archive with a fresh state database"
-            )
             raise ZimigrateError(
                 "Import options differ from the existing checkpoints; "
                 "use a copied archive with a fresh state database"
@@ -924,6 +1051,8 @@ class Importer:
                 kind, name, operations, sensitive=sensitive
             ),
         )
+        if attributes:
+            self._forget_destination_attributes(kind, name)
 
     def _apply_custom(
         self,
@@ -981,8 +1110,10 @@ def _same_import_bind(previous: str | None, current: str) -> bool:
         return previous == current
     previous_value.setdefault("target_users", [])
     previous_value.setdefault("target_domains", [])
+    previous_value.setdefault("allow_unverified_remote_capacity", False)
     current_value.setdefault("target_users", [])
     current_value.setdefault("target_domains", [])
+    current_value.setdefault("allow_unverified_remote_capacity", False)
     return previous_value == current_value
 
 

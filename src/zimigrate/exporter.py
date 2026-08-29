@@ -16,7 +16,7 @@ from zimigrate.models import Artifact, Attributes, EntityRecord
 from zimigrate.progress import PhaseProgress, entity_start_fields
 from zimigrate.scope import scope_from_transfer, selected_accounts, selected_names
 from zimigrate.util import atomic_json, ensure_relative_path, open_private_temporary
-from zimigrate.zimbra import ZimbraClient
+from zimigrate.zimbra import ZimbraClient, required_export_commands
 
 LOGGER = logging.getLogger(__name__)
 
@@ -30,18 +30,31 @@ class Exporter:
             retries=config.transfer.retries,
             retry_base_seconds=config.transfer.retry_base_seconds,
         )
+        self._validated_entity_checkpoints: set[tuple[str, str]] = set()
 
     def run(self) -> dict[str, int]:
-        version = self.client.preflight(require_mailbox=self.config.transfer.include_mailboxes)
+        transfer = self.config.transfer
+        version = self.client.preflight(
+            require_mailbox=transfer.include_mailboxes,
+            required_provisioning_commands=required_export_commands(transfer),
+            required_mailbox_commands={"getRestURL"} if transfer.include_mailboxes else set(),
+            require_mailbox_output=transfer.include_mailboxes,
+        )
         source_host = self.client.hostname()
         export_options = self._export_options()
         existing_manifest = self.archive.manifest(optional=True)
         if existing_manifest:
             existing_host = existing_manifest.get("source_host")
+            existing_version = existing_manifest.get("source_version")
             existing_options = existing_manifest.get("export_options")
             if existing_host and existing_host != source_host:
                 raise ZimigrateError(
                     f"Archive belongs to source {existing_host}, not {source_host}"
+                )
+            if existing_version and existing_version != version:
+                raise ZimigrateError(
+                    "Source Zimbra version changed since this export started; "
+                    "use a new archive directory"
                 )
             if existing_options and existing_options != export_options:
                 raise ZimigrateError(
@@ -52,7 +65,6 @@ class Exporter:
             extra={"event": "preflight", "version": version, "host": source_host},
         )
 
-        transfer = self.config.transfer
         LOGGER.info("Discovering source inventory")
         if transfer.include_server_config or transfer.include_mailboxes:
             LOGGER.info("Listing source servers")
@@ -180,7 +192,16 @@ class Exporter:
         accounts: list[str],
         server_attributes: dict[str, Attributes],
     ) -> None:
-        completed_accounts = self.archive.state.successful_entities("export:account")
+        completed_accounts = {
+            account
+            for account in accounts
+            if self._valid_entity_checkpoint(
+                "export:account",
+                "account",
+                account,
+                account_record=True,
+            )
+        }
         remaining_accounts = [account for account in accounts if account not in completed_accounts]
         mailbox_usage: dict[str, int] = {}
         LOGGER.info("Checking export disk capacity")
@@ -302,21 +323,47 @@ class Exporter:
             raise ZimigrateError(f"Domain not found: {missing[0]}")
         if not scope.domains:
             return selected
+        attributes_by_name = self._get_domains_parallel(names)
         selected_ids: set[str] = set()
         chosen = {name.casefold() for name in selected}
         for name in selected:
-            if zimbra_id := first(self.client.get_domain(name), "zimbraId"):
+            if zimbra_id := first(attributes_by_name[name], "zimbraId"):
                 selected_ids.add(zimbra_id)
         for name in names:
             if name.casefold() in chosen:
                 continue
-            attributes = self.client.get_domain(name)
+            attributes = attributes_by_name[name]
             domain_type = (first(attributes, "zimbraDomainType", "") or "").lower()
             target = first(attributes, "zimbraDomainAliasTargetId")
             if (domain_type == "alias" or target) and target in selected_ids:
                 selected.append(name)
                 chosen.add(name.casefold())
         return selected
+
+    def _get_domains_parallel(self, names: list[str]) -> dict[str, Attributes]:
+        if not names:
+            return {}
+        results: dict[str, Attributes] = {}
+        errors: list[tuple[str, Exception]] = []
+        with WorkerPool(self.config.transfer.workers, "export-domain-lookup") as executor:
+            for name, future in bounded_futures(
+                executor,
+                names,
+                self.client.get_domain,
+                max_pending=self.config.transfer.workers * 2,
+            ):
+                try:
+                    results[name] = future.result()
+                except Interrupted:
+                    raise
+                except Exception as exc:
+                    errors.append((name, exc))
+        if errors:
+            raise ZimigrateError(
+                f"{len(errors)} domain lookup(s) failed; first failure: "
+                f"{errors[0][0]}: {_error_summary(errors[0][1])}"
+            )
+        return results
 
     def _export_singleton(
         self,
@@ -326,7 +373,7 @@ class Exporter:
         *,
         phase: str,
     ) -> None:
-        if self.archive.state.is_success(phase, name):
+        if self._valid_entity_checkpoint(phase, kind, name):
             return
         LOGGER.info(
             "Exporting %s %s",
@@ -348,7 +395,7 @@ class Exporter:
 
     def _export_entity(self, kind: str, name: str, getter: object) -> None:
         phase = f"export:{kind}"
-        if self.archive.state.is_success(phase, name):
+        if self._valid_entity_checkpoint(phase, kind, name):
             return
         LOGGER.info(
             "Exporting %s %s",
@@ -374,7 +421,7 @@ class Exporter:
 
     def _export_account(self, account: str, known_resource: bool) -> None:
         phase = "export:account"
-        if self.archive.state.is_success(phase, account):
+        if self._valid_entity_checkpoint(phase, "account", account, account_record=True):
             return
         LOGGER.info(
             "Exporting account %s",
@@ -447,6 +494,7 @@ class Exporter:
                         artifact.sha256,
                         deep=False,
                         archive_format=artifact.archive_format,
+                        expected_size=artifact.size,
                     )
                     artifacts.append(artifact)
                     continue
@@ -479,16 +527,14 @@ class Exporter:
                 )
                 unpacked_size = validate_mailbox_archive(plaintext, archive_format)
                 relative = self.archive.mailbox_relative_path(account, label, archive_format)
-                checksum, plaintext_checksum, size = self.archive.store_mailbox(plaintext, relative)
+                checksum, size = self.archive.store_mailbox(plaintext, relative)
                 artifact = Artifact(
                     label=label,
                     path=relative,
                     sha256=checksum,
-                    plaintext_sha256=plaintext_checksum,
                     size=size,
                     query=query,
                     archive_format=archive_format,
-                    encrypted=False,
                     unpacked_size=unpacked_size,
                 )
                 self.archive.state.succeed(
@@ -542,7 +588,12 @@ class Exporter:
 
     def _export_distribution_list(self, name: str) -> None:
         phase = "export:distribution-list"
-        if self.archive.state.is_success(phase, name):
+        if self._valid_entity_checkpoint(
+            phase,
+            "distribution_list",
+            name,
+            distribution_record=True,
+        ):
             return
         LOGGER.info(
             "Exporting distribution list %s",
@@ -574,6 +625,60 @@ class Exporter:
         return exportable_attributes(
             attributes, include_secrets=self.config.transfer.include_secrets
         )
+
+    def _valid_entity_checkpoint(
+        self,
+        phase: str,
+        kind: str,
+        name: str,
+        *,
+        account_record: bool = False,
+        distribution_record: bool = False,
+    ) -> bool:
+        checkpoint_key = (phase, name)
+        if checkpoint_key in self._validated_entity_checkpoints:
+            return True
+        state = self.archive.state.get(phase, name)
+        if state is None or state.status != "success":
+            return False
+        if not state.artifact_path or not state.checksum:
+            LOGGER.warning(
+                "Completed entity checkpoint has no artifact identity; exporting it again",
+                extra={"kind": kind, "entity": name},
+            )
+            return False
+        candidate_kinds = [kind]
+        if account_record:
+            candidate_kinds = ["account", "calendar_resource"]
+        elif distribution_record:
+            candidate_kinds = ["distribution_list", "dynamic_distribution_list"]
+        try:
+            record = next(
+                self.archive.validate_entity_artifact(
+                    candidate,
+                    name,
+                    state.artifact_path,
+                    state.checksum,
+                )
+                for candidate in candidate_kinds
+                if state.artifact_path == self.archive.entity_relative_path(candidate, name)
+            )
+            for artifact in record.artifacts:
+                self.archive.validate_mailbox_artifact(
+                    artifact.path,
+                    artifact.sha256,
+                    deep=False,
+                    archive_format=artifact.archive_format,
+                    expected_size=artifact.size,
+                )
+        except Exception as exc:
+            LOGGER.warning(
+                "Completed entity artifact is invalid; exporting it again",
+                extra={"kind": kind, "entity": name, "error": _error_summary(exc)},
+            )
+            return False
+        self._validated_entity_checkpoints.add(checkpoint_key)
+        return True
 
     def _run_parallel(self, label: str, names: list[str], operation: object) -> None:
         progress = PhaseProgress(LOGGER, kind=label, total=len(names), action="export")

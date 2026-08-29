@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from zimigrate.errors import ConfigurationError
+from zimigrate.util import is_valid_dns_name
 
 
 @dataclass(frozen=True, slots=True)
@@ -29,14 +30,6 @@ class EndpointConfig:
             raise ConfigurationError(f"{label}.command_timeout_seconds must be positive")
         if self.mailbox_timeout_seconds < 1:
             raise ConfigurationError(f"{label}.mailbox_timeout_seconds must be positive")
-
-
-@dataclass(frozen=True, slots=True)
-class ArchiveConfig:
-    """Archive layout options. Encryption is not supported."""
-
-    def validate(self) -> None:
-        return
 
 
 @dataclass(frozen=True, slots=True)
@@ -98,6 +91,7 @@ class ImportConfig:
     default_mailhost: str | None = None
     import_system_accounts: bool = False
     allow_sensitive_config: bool = False
+    allow_unverified_remote_capacity: bool = False
 
     def allows_version(self, version: str) -> bool:
         pattern = self.expected_target_version_pattern.strip()
@@ -132,7 +126,7 @@ class ImportConfig:
         ]
         if self.default_mailhost:
             mailhosts.append(self.default_mailhost)
-        if any(not re.fullmatch(r"[A-Za-z0-9_.-]+", host) for host in mailhosts):
+        if any(not is_valid_dns_name(host) for host in mailhosts):
             raise ConfigurationError("import mailhost names contain unsafe characters")
 
 
@@ -140,14 +134,12 @@ class ImportConfig:
 class AppConfig:
     source: EndpointConfig
     target: EndpointConfig
-    archive: ArchiveConfig
     transfer: TransferConfig
     import_options: ImportConfig
 
     def validate(self) -> None:
         self.source.validate("source")
         self.target.validate("target")
-        self.archive.validate()
         self.transfer.validate()
         self.import_options.validate()
 
@@ -166,10 +158,10 @@ def load_config(path: Path | None = None) -> AppConfig:
     config = AppConfig(
         source=_endpoint(_table(raw, "source"), "source"),
         target=_endpoint(_table(raw, "target"), "target"),
-        archive=_archive(_table(raw, "archive")),
         transfer=_transfer(_table(raw, "transfer")),
         import_options=_import(_table(raw, "import")),
     )
+    _validate_archive_table(_table(raw, "archive"))
     config.validate()
     return config
 
@@ -214,14 +206,13 @@ def _endpoint(raw: dict[str, Any], label: str) -> EndpointConfig:
 REMOVED_ARCHIVE_KEYS = {"encryption_enabled", "passphrase_env", "allow_unencrypted"}
 
 
-def _archive(raw: dict[str, Any]) -> ArchiveConfig:
+def _validate_archive_table(raw: dict[str, Any]) -> None:
     if removed := sorted(REMOVED_ARCHIVE_KEYS.intersection(raw)):
         raise ConfigurationError(
             "Archive encryption was removed; drop "
             f"{removed[0]} from the [archive] configuration table"
         )
     _reject_unknown(raw, set(), "archive")
-    return ArchiveConfig()
 
 
 def _transfer(raw: dict[str, Any]) -> TransferConfig:
@@ -289,6 +280,7 @@ def _import(raw: dict[str, Any]) -> ImportConfig:
         "default_mailhost",
         "import_system_accounts",
         "allow_sensitive_config",
+        "allow_unverified_remote_capacity",
     }
     _reject_unknown(raw, allowed, "import")
     server_map = raw.get("server_map", {})
@@ -316,6 +308,12 @@ def _import(raw: dict[str, Any]) -> ImportConfig:
         default_mailhost=_optional_string(raw.get("default_mailhost"), "import.default_mailhost"),
         import_system_accounts=_boolean(raw, "import_system_accounts", False, "import"),
         allow_sensitive_config=_boolean(raw, "allow_sensitive_config", False, "import"),
+        allow_unverified_remote_capacity=_boolean(
+            raw,
+            "allow_unverified_remote_capacity",
+            False,
+            "import",
+        ),
     )
 
 

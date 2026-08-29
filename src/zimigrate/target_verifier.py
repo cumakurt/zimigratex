@@ -4,9 +4,10 @@ import json
 import os
 import re
 from collections import Counter
+from dataclasses import replace
 
 from zimigrate.archive import MigrationArchive
-from zimigrate.attributes import first, mutable_attributes
+from zimigrate.attributes import SIGNATURE_REFERENCE_ATTRIBUTES, first, mutable_attributes
 from zimigrate.config import AppConfig
 from zimigrate.data_source import decrypt_data_source_secrets
 from zimigrate.errors import CompatibilityError, ZimigrateError
@@ -19,19 +20,8 @@ from zimigrate.scope import (
     scope_from_transfer,
 )
 from zimigrate.util import atomic_json, ensure_relative_path
-from zimigrate.zimbra import ZimbraClient
+from zimigrate.zimbra import ZimbraClient, required_verification_commands
 
-SIGNATURE_REFERENCE_ATTRIBUTES = {
-    "zimbraPrefDefaultSignatureId",
-    "zimbraPrefForwardReplySignatureId",
-    "zimbraPrefMailSignatureContactId",
-    "zimbraPrefCalendarAutoAcceptSignatureId",
-    "zimbraPrefCalendarAutoDeclineSignatureId",
-    "zimbraPrefCalendarAutoDenySignatureId",
-    "zimbraPrefCalendarAcceptSignatureId",
-    "zimbraPrefCalendarTentativeSignatureId",
-    "zimbraPrefCalendarDeclineSignatureId",
-}
 ZIMBRA_ID = re.compile(
     r"(?<![0-9A-Fa-f])"
     r"[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-"
@@ -54,19 +44,52 @@ class TargetVerifier:
         self.skipped = 0
         self._existence_cache: dict[tuple[str, str], bool] = {}
         self._attribute_cache: dict[tuple[str, str], Attributes] = {}
+        self._import_binding: dict[str, object] = {}
 
     def run(self) -> dict[str, int]:
         manifest = self.archive.manifest()
         if not manifest.get("completed"):
             raise ZimigrateError("The export is incomplete; target verification cannot run")
-        version = self.client.preflight(require_mailbox=self.config.transfer.include_mailboxes)
+        self._import_binding = _bound_import_options(self.archive)
+        selected = _imported_categories(self._import_binding)
+        options = self.config.import_options
+        verification_transfer = replace(
+            self.config.transfer,
+            **{
+                field: selected[field]
+                for field in (
+                    "include_cos",
+                    "include_domains",
+                    "include_accounts",
+                    "include_mailboxes",
+                    "include_distribution_lists",
+                )
+            },
+            include_global_config=(
+                selected["include_global_config"]
+                and _boolean_option(
+                    self._import_binding,
+                    "apply_global_config",
+                    options.apply_global_config,
+                )
+            ),
+            include_server_config=(
+                selected["include_server_config"]
+                and _boolean_option(
+                    self._import_binding,
+                    "apply_server_config",
+                    options.apply_server_config,
+                )
+            ),
+        )
+        version = self.client.preflight(
+            required_provisioning_commands=required_verification_commands(verification_transfer)
+        )
         if not self.config.import_options.allows_version(version):
             raise CompatibilityError(
                 f"Target version '{version}' does not match required pattern "
                 f"'{self.config.import_options.expected_target_version_pattern}'"
             )
-
-        selected = _imported_categories(self.archive)
         cos_records = (
             list(self.archive.iter_entities("cos")) if selected.get("include_cos", True) else []
         )
@@ -135,7 +158,12 @@ class TargetVerifier:
             if attributes is None or self._was_skipped(record):
                 continue
             self._verify_aliases(record, attributes)
-            self._verify_attributes(record, attributes, object_mapping)
+            signature_mapping = self._verify_account_sections(record)
+            self._verify_attributes(
+                record,
+                attributes,
+                {**object_mapping, **signature_mapping},
+            )
             source_status = first(record.attributes, "zimbraAccountStatus")
             if source_status is not None and source_status != first(
                 attributes, "zimbraAccountStatus"
@@ -145,9 +173,17 @@ class TargetVerifier:
             if source_cos and first(attributes, "zimbraCOSId") != object_mapping.get(source_cos):
                 self._mismatch(record, "zimbraCOSId", "destination COS does not match")
             source_mailhost = first(record.attributes, "zimbraMailHost")
-            expected_mailhost = self.config.import_options.mailhost_map.get(
-                source_mailhost or "", self.config.import_options.default_mailhost
+            mailhost_map = _string_mapping_option(
+                self._import_binding,
+                "mailhost_map",
+                self.config.import_options.mailhost_map,
             )
+            default_mailhost = _optional_string_option(
+                self._import_binding,
+                "default_mailhost",
+                self.config.import_options.default_mailhost,
+            )
+            expected_mailhost = mailhost_map.get(source_mailhost or "", default_mailhost)
             imported = self.archive.state.get(f"import:{record.kind}", record.name)
             if (
                 expected_mailhost
@@ -175,7 +211,6 @@ class TargetVerifier:
                             f"mailbox:{artifact.label}",
                             "mailbox import has no successful checkpoint",
                         )
-            self._verify_account_sections(record)
 
         for record in distribution_records:
             if import_started and not self._was_imported(record):
@@ -195,6 +230,8 @@ class TargetVerifier:
                         f"{len(missing)} distribution member(s) are missing",
                     )
 
+        self._verify_optional_configuration(selected)
+
         report = {
             "checked": self.checked,
             "skipped_existing": self.skipped,
@@ -213,6 +250,92 @@ class TargetVerifier:
             "skipped_existing": self.skipped,
             "mismatches": 0,
         }
+
+    def _verify_optional_configuration(self, selected: dict[str, bool]) -> None:
+        options = self.config.import_options
+        apply_global = _boolean_option(
+            self._import_binding,
+            "apply_global_config",
+            options.apply_global_config,
+        )
+        if selected["include_global_config"] and apply_global:
+            records = list(self.archive.iter_entities("global_config"))
+            if records:
+                record = records[0]
+                self.checked += 1
+                if not self.archive.state.is_success("import:global-config", "global"):
+                    self._mismatch(record, "checkpoint", "global configuration was not imported")
+                else:
+                    allowlist = _string_tuple_option(
+                        self._import_binding,
+                        "global_attribute_allowlist",
+                        options.global_attribute_allowlist,
+                    )
+                    expected = mutable_attributes(
+                        "global_config",
+                        record.attributes,
+                        allowlist=allowlist,
+                        allow_sensitive=_boolean_option(
+                            self._import_binding,
+                            "allow_sensitive_config",
+                            options.allow_sensitive_config,
+                        ),
+                    )
+                    self._compare_attributes(
+                        record,
+                        expected,
+                        self.client.get_global_config(),
+                        {},
+                        field_prefix="attribute",
+                    )
+
+        apply_server = _boolean_option(
+            self._import_binding,
+            "apply_server_config",
+            options.apply_server_config,
+        )
+        if not selected["include_server_config"] or not apply_server:
+            return
+        server_map = _string_mapping_option(
+            self._import_binding,
+            "server_map",
+            options.server_map,
+        )
+        allowlist = _string_tuple_option(
+            self._import_binding,
+            "server_attribute_allowlist",
+            options.server_attribute_allowlist,
+        )
+        allow_sensitive = _boolean_option(
+            self._import_binding,
+            "allow_sensitive_config",
+            options.allow_sensitive_config,
+        )
+        for record in self.archive.iter_entities("server"):
+            destination_name = server_map.get(record.name)
+            if not destination_name:
+                continue
+            self.checked += 1
+            if not self.archive.state.is_success("import:server-config", record.name):
+                self._mismatch(record, "checkpoint", "server configuration was not imported")
+                continue
+            target = self.client.get_optional("server", destination_name)
+            if target is None:
+                self._mismatch(record, "existence", "mapped destination server does not exist")
+                continue
+            expected = mutable_attributes(
+                "server",
+                record.attributes,
+                allowlist=allowlist,
+                allow_sensitive=allow_sensitive,
+            )
+            self._compare_attributes(
+                record,
+                expected,
+                target,
+                {},
+                field_prefix="attribute",
+            )
 
     def _verify_existence(self, record: EntityRecord) -> Attributes | None:
         self.checked += 1
@@ -257,7 +380,7 @@ class TargetVerifier:
             field_prefix="attribute",
         )
 
-    def _verify_account_sections(self, record: EntityRecord) -> None:
+    def _verify_account_sections(self, record: EntityRecord) -> dict[str, str]:
         target_signatures = self.client.get_signatures(record.name)
         signature_mapping = self._verify_sections(
             record,
@@ -286,6 +409,7 @@ class TargetVerifier:
             id_attribute="zimbraDataSourceId",
             value_mapping={},
         )
+        return signature_mapping
 
     def _verify_sections(
         self,
@@ -365,24 +489,36 @@ class TargetVerifier:
     def _exists(self, record: EntityRecord) -> bool:
         key = (record.kind, record.name)
         if key not in self._existence_cache:
-            self._existence_cache[key] = self.client.exists(record.kind, record.name)
+            attributes = self._lookup_destination(record)
+            self._existence_cache[key] = attributes is not None
+            if attributes is not None:
+                self._attribute_cache[key] = attributes
         return self._existence_cache[key]
 
     def _attributes(self, record: EntityRecord) -> Attributes:
         key = (record.kind, record.name)
         if key not in self._attribute_cache:
-            if record.kind == "cos":
-                attributes = self.client.get_cos(record.name)
-            elif record.kind == "domain":
-                attributes = self.client.get_domain(record.name)
-            elif record.kind == "calendar_resource":
-                attributes = self.client.get_calendar_resource(record.name)
-            elif record.kind == "account":
-                attributes = self.client.get_account(record.name)
-            else:
-                attributes = self.client.get_distribution_list(record.name)
+            attributes = self._lookup_destination(record)
+            if attributes is None:
+                raise ZimigrateError(f"Destination {record.kind} {record.name} does not exist")
             self._attribute_cache[key] = attributes
         return self._attribute_cache[key]
+
+    def _lookup_destination(self, record: EntityRecord) -> Attributes | None:
+        optional = getattr(self.client, "get_optional", None)
+        if callable(optional):
+            return optional(record.kind, record.name)
+        if not self.client.exists(record.kind, record.name):
+            return None
+        if record.kind == "cos":
+            return self.client.get_cos(record.name)
+        if record.kind == "domain":
+            return self.client.get_domain(record.name)
+        if record.kind == "calendar_resource":
+            return self.client.get_calendar_resource(record.name)
+        if record.kind == "account":
+            return self.client.get_account(record.name)
+        return self.client.get_distribution_list(record.name)
 
     def _was_skipped(self, record: EntityRecord) -> bool:
         state = self.archive.state.get(f"import:{record.kind}", record.name)
@@ -411,38 +547,73 @@ def _remap_reference(value: str, normalized_mapping: dict[str, str]) -> str:
     )
 
 
-def _imported_categories(archive: MigrationArchive) -> dict[str, bool]:
+def _bound_import_options(archive: MigrationArchive) -> dict[str, object]:
     state = archive.state.get("import:configuration", "options")
-    if not state or state.status != "success" or not state.detail:
-        return {
-            "include_cos": True,
-            "include_domains": True,
-            "include_accounts": True,
-            "include_mailboxes": True,
-            "include_distribution_lists": True,
-        }
+    if not state or state.status != "success":
+        return {}
+    if not state.detail:
+        raise ZimigrateError("Import configuration checkpoint is incomplete")
     try:
         options = json.loads(state.detail)
-    except json.JSONDecodeError:
-        return {
-            "include_cos": True,
-            "include_domains": True,
-            "include_accounts": True,
-            "include_mailboxes": True,
-            "include_distribution_lists": True,
-        }
+    except json.JSONDecodeError as exc:
+        raise ZimigrateError("Import configuration checkpoint is invalid JSON") from exc
     if not isinstance(options, dict):
-        return {
-            "include_cos": True,
-            "include_domains": True,
-            "include_accounts": True,
-            "include_mailboxes": True,
-            "include_distribution_lists": True,
-        }
+        raise ZimigrateError("Import configuration checkpoint is not an object")
+    return options
+
+
+def _imported_categories(options: dict[str, object]) -> dict[str, bool]:
     return {
-        "include_cos": bool(options.get("include_cos", True)),
-        "include_domains": bool(options.get("include_domains", True)),
-        "include_accounts": bool(options.get("include_accounts", True)),
-        "include_mailboxes": bool(options.get("include_mailboxes", True)),
-        "include_distribution_lists": bool(options.get("include_distribution_lists", True)),
+        name: _boolean_option(options, name, True)
+        for name in (
+            "include_cos",
+            "include_domains",
+            "include_accounts",
+            "include_mailboxes",
+            "include_distribution_lists",
+            "include_global_config",
+            "include_server_config",
+        )
     }
+
+
+def _boolean_option(options: dict[str, object], name: str, fallback: bool) -> bool:
+    value = options.get(name, fallback)
+    if not isinstance(value, bool):
+        raise ZimigrateError(f"Import configuration option is invalid: {name}")
+    return value
+
+
+def _string_mapping_option(
+    options: dict[str, object],
+    name: str,
+    fallback: dict[str, str],
+) -> dict[str, str]:
+    value = options.get(name, fallback)
+    if not isinstance(value, dict) or any(
+        not isinstance(key, str) or not isinstance(item, str) for key, item in value.items()
+    ):
+        raise ZimigrateError(f"Import configuration option is invalid: {name}")
+    return dict(value)
+
+
+def _string_tuple_option(
+    options: dict[str, object],
+    name: str,
+    fallback: tuple[str, ...],
+) -> tuple[str, ...]:
+    value = options.get(name, fallback)
+    if not isinstance(value, (list, tuple)) or any(not isinstance(item, str) for item in value):
+        raise ZimigrateError(f"Import configuration option is invalid: {name}")
+    return tuple(value)
+
+
+def _optional_string_option(
+    options: dict[str, object],
+    name: str,
+    fallback: str | None,
+) -> str | None:
+    value = options.get(name, fallback)
+    if value is not None and not isinstance(value, str):
+        raise ZimigrateError(f"Import configuration option is invalid: {name}")
+    return value

@@ -27,7 +27,7 @@ class CommandError(ZimigrateError):
 
 
 class ArchiveError(ZimigrateError):
-    """Raised when an archive is incomplete, corrupt, or cannot be decrypted."""
+    """Raised when an archive is incomplete, corrupt, or unsupported."""
 
 
 class CompatibilityError(ZimigrateError):

@@ -33,7 +33,11 @@ from zimigrate.selection import (
 from zimigrate.state import StateStore
 from zimigrate.target_verifier import TargetVerifier
 from zimigrate.verifier import verify_archive
-from zimigrate.zimbra import ZimbraClient
+from zimigrate.zimbra import (
+    ZimbraClient,
+    required_export_commands,
+    required_import_commands,
+)
 
 DEFAULT_ARCHIVE = Path("export_data")
 LOGGER = logging.getLogger(__name__)
@@ -152,7 +156,6 @@ def main(argv: list[str] | None = None) -> int:
         if arguments.command == "export":
             archive = MigrationArchive(
                 arguments.archive,
-                config.archive,
                 create=True,
             )
             with archive.lock():
@@ -162,7 +165,6 @@ def main(argv: list[str] | None = None) -> int:
         elif arguments.command == "import":
             archive = MigrationArchive(
                 arguments.archive,
-                config.archive,
                 create=False,
             )
             with archive.lock():
@@ -190,7 +192,6 @@ def main(argv: list[str] | None = None) -> int:
         elif arguments.command == "verify":
             archive = MigrationArchive(
                 arguments.archive,
-                config.archive,
                 create=False,
             )
             with archive.lock():
@@ -203,7 +204,6 @@ def main(argv: list[str] | None = None) -> int:
         else:
             archive = MigrationArchive(
                 arguments.archive,
-                config.archive,
                 create=False,
             )
             with archive.lock():
@@ -251,13 +251,26 @@ def _preflight(config: AppConfig, side: str) -> dict[str, str]:
             config.source,
             retries=config.transfer.retries,
             retry_base_seconds=config.transfer.retry_base_seconds,
-        ).preflight(require_mailbox=config.transfer.include_mailboxes)
+        ).preflight(
+            require_mailbox=config.transfer.include_mailboxes,
+            required_provisioning_commands=required_export_commands(config.transfer),
+            required_mailbox_commands=(
+                {"getRestURL"} if config.transfer.include_mailboxes else set()
+            ),
+            require_mailbox_output=config.transfer.include_mailboxes,
+        )
     if side in {"target", "both"}:
         target_version = ZimbraClient(
             config.target,
             retries=config.transfer.retries,
             retry_base_seconds=config.transfer.retry_base_seconds,
-        ).preflight(require_mailbox=config.transfer.include_mailboxes)
+        ).preflight(
+            require_mailbox=config.transfer.include_mailboxes,
+            required_provisioning_commands=required_import_commands(config.transfer),
+            required_mailbox_commands=(
+                {"postRestURL"} if config.transfer.include_mailboxes else set()
+            ),
+        )
         if not config.import_options.allows_version(target_version):
             raise ZimigrateError(
                 f"Target version '{target_version}' does not match required pattern "
@@ -331,10 +344,7 @@ def _configure_import_categories(
                 "Resume must use the same --user/--domain values as the existing import"
             )
         if bound.detail:
-            try:
-                options = json.loads(bound.detail)
-            except json.JSONDecodeError:
-                options = {}
+            options = json.loads(bound.detail)
             if isinstance(options, dict):
                 selected = {
                     key

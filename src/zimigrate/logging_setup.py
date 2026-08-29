@@ -486,13 +486,24 @@ def _facts_table(snapshot: DashboardSnapshot) -> Table:
 
 
 def _capacity_table(capacity: tuple[tuple[str, str], ...]) -> Panel:
+    status = dict(capacity).get("Disk", "").casefold()
+    value_style = {
+        "sufficient": "bold green",
+        "warning": "bold yellow",
+        "insufficient": "bold red",
+    }.get(status, "bold cyan")
+    border_style = {
+        "sufficient": "green",
+        "warning": "yellow",
+        "insufficient": "red",
+    }.get(status, "cyan")
     table = Table.grid(expand=True, padding=(0, 2))
     for _ in capacity:
         table.add_column(ratio=1)
     table.add_row(
-        *[Text.assemble((label + " ", "dim"), (value, "bold green")) for label, value in capacity]
+        *[Text.assemble((label + " ", "dim"), (value, value_style)) for label, value in capacity]
     )
-    return Panel(table, title="Capacity", border_style="green", box=box.SIMPLE)
+    return Panel(table, title="Capacity", border_style=border_style, box=box.SIMPLE)
 
 
 def _phase_table(phases: tuple[PhaseState, ...], *, compact: bool) -> Panel:

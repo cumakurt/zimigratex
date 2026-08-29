@@ -5,14 +5,14 @@ import json
 import os
 import stat
 import tarfile
+import threading
 import uuid
 import zipfile
 from collections.abc import Iterator
 from pathlib import Path, PurePosixPath
 from typing import Any
 
-from zimigrate.config import ArchiveConfig
-from zimigrate.errors import ArchiveError
+from zimigrate.errors import ArchiveError, ZimigrateError
 from zimigrate.models import EntityRecord
 from zimigrate.state import StateStore
 from zimigrate.util import (
@@ -36,7 +36,6 @@ class MigrationArchive:
     def __init__(
         self,
         root: Path,
-        config: ArchiveConfig,
         *,
         create: bool,
     ) -> None:
@@ -46,7 +45,6 @@ class MigrationArchive:
         if not self.root.is_dir():
             raise ArchiveError(f"Archive directory does not exist: {self.root}")
         os.chmod(self.root, 0o700)
-        self.config = config
         _reject_encrypted_archive(self.root)
         manifest_path = ensure_relative_path(self.root, "manifest.json")
         if not manifest_path.exists() and any(
@@ -57,7 +55,18 @@ class MigrationArchive:
             )
         if manifest_path.exists() and self.manifest().get("encrypted"):
             raise ArchiveError("Encrypted archives are not supported")
-        self.state = StateStore(ensure_relative_path(self.root, "state.sqlite3"))
+        state_path = ensure_relative_path(self.root, "state.sqlite3")
+        if (not create or manifest_path.exists()) and not state_path.is_file():
+            raise ArchiveError("Archive checkpoint database is missing: state.sqlite3")
+        try:
+            self.state = StateStore(state_path)
+        except ZimigrateError as exc:
+            raise ArchiveError(str(exc)) from exc
+        self._mailbox_validation_cache: dict[
+            str,
+            tuple[str, int, tuple[int, int, int, int, int], int | None],
+        ] = {}
+        self._mailbox_validation_lock = threading.Lock()
 
     def lock(self) -> FileLock:
         return FileLock(self.root / ".lock")
@@ -77,6 +86,23 @@ class MigrationArchive:
 
     def read_entity(self, kind: str, name: str) -> EntityRecord:
         return self._read_entity_path(self.entity_relative_path(kind, name))
+
+    def validate_entity_artifact(
+        self,
+        kind: str,
+        name: str,
+        relative: str,
+        expected_checksum: str,
+    ) -> EntityRecord:
+        expected_relative = self.entity_relative_path(kind, name)
+        if relative != expected_relative:
+            raise ArchiveError(f"Entity checkpoint path does not match {kind} {name}")
+        path = ensure_relative_path(self.root, relative)
+        if not path.is_file():
+            raise ArchiveError(f"Entity artifact is missing: {relative}")
+        if sha256_file(path) != expected_checksum:
+            raise ArchiveError(f"Entity artifact checksum mismatch: {relative}")
+        return self._read_entity_path(relative)
 
     def iter_entities(self, kind: str) -> Iterator[EntityRecord]:
         directory = ensure_relative_path(self.root, f"objects/{kind}")
@@ -119,13 +145,10 @@ class MigrationArchive:
         label_name = safe_entity_filename(label)
         return f"mailboxes/{account_dir}/{label_name}.{archive_format}"
 
-    def store_mailbox(self, plaintext: Path, relative: str) -> tuple[str, str, int]:
+    def store_mailbox(self, plaintext: Path, relative: str) -> tuple[str, int]:
         destination = ensure_relative_path(self.root, relative)
         digest, size = place_file(plaintext, destination)
-        return digest, digest, size
-
-    def materialize_mailbox(self, relative: str) -> Iterator[Path]:
-        return _MaterializedMailbox(self, relative)
+        return digest, size
 
     def validate_mailbox_artifact(
         self,
@@ -134,21 +157,49 @@ class MigrationArchive:
         *,
         deep: bool,
         archive_format: str = "tgz",
-        expected_plaintext_checksum: str | None = None,
+        expected_size: int | None = None,
         expected_unpacked_size: int | None = None,
     ) -> None:
         path = ensure_relative_path(self.root, relative)
         if not path.is_file():
             raise ArchiveError(f"Mailbox artifact is missing: {relative}")
-        actual = sha256_file(path)
-        if actual != expected_checksum:
+        before = path.stat()
+        if expected_size is not None and before.st_size != expected_size:
+            raise ArchiveError(f"Mailbox artifact size mismatch: {relative}")
+        identity = _file_identity(before)
+        with self._mailbox_validation_lock:
+            cached = self._mailbox_validation_cache.get(relative)
+        cache_matches = bool(
+            cached
+            and cached[0] == expected_checksum
+            and cached[1] == before.st_size
+            and cached[2] == identity
+        )
+        if cache_matches and (not deep or cached[3] is not None):
+            if deep and expected_unpacked_size is not None and cached[3] != expected_unpacked_size:
+                raise ArchiveError(f"Unpacked mailbox size mismatch: {relative}")
+            return
+        if not cache_matches and sha256_file(path) != expected_checksum:
             raise ArchiveError(f"Mailbox artifact checksum mismatch: {relative}")
+        unpacked_size: int | None = None
         if deep:
-            if expected_plaintext_checksum is not None and expected_plaintext_checksum != actual:
-                raise ArchiveError(f"Plaintext mailbox checksum mismatch: {relative}")
-            unpacked_size = validate_mailbox_archive(path, archive_format)
+            unpacked_size = validate_mailbox_archive(
+                path,
+                archive_format,
+                maximum_unpacked_size=expected_unpacked_size,
+            )
             if expected_unpacked_size is not None and unpacked_size != expected_unpacked_size:
                 raise ArchiveError(f"Unpacked mailbox size mismatch: {relative}")
+        after = path.stat()
+        if _file_identity(after) != identity:
+            raise ArchiveError(f"Mailbox artifact changed during validation: {relative}")
+        with self._mailbox_validation_lock:
+            self._mailbox_validation_cache[relative] = (
+                expected_checksum,
+                after.st_size,
+                identity,
+                unpacked_size,
+            )
 
     def write_manifest(
         self,
@@ -164,7 +215,7 @@ class MigrationArchive:
             for directory in objects.iterdir():
                 if directory.is_dir():
                     counts[directory.name] = sum(
-                        1 for path in directory.iterdir() if path.is_file()
+                        1 for path in directory.glob("*.json") if path.is_file()
                     )
         current = self.manifest(optional=True)
         manifest = {
@@ -194,31 +245,20 @@ class MigrationArchive:
         return value
 
 
-class _MaterializedMailbox:
-    def __init__(self, archive: MigrationArchive, relative: str) -> None:
-        self.archive = archive
-        self.relative = relative
-        self.path: Path | None = None
-
-    def __enter__(self) -> Path:
-        self.path = ensure_relative_path(self.archive.root, self.relative)
-        if not self.path.is_file():
-            raise ArchiveError(f"Mailbox artifact is missing: {self.relative}")
-        return self.path
-
-    def __exit__(self, *_: object) -> None:
-        self.path = None
-
-
-def validate_mailbox_archive(path: Path, archive_format: str) -> int:
+def validate_mailbox_archive(
+    path: Path,
+    archive_format: str,
+    *,
+    maximum_unpacked_size: int | None = None,
+) -> int:
     if archive_format == "zip":
-        return _validate_zip(path)
+        return _validate_zip(path, maximum_unpacked_size)
     if archive_format == "tgz":
-        return _validate_tgz(path)
+        return _validate_tgz(path, maximum_unpacked_size)
     raise ArchiveError(f"Unsupported mailbox archive format: {archive_format}")
 
 
-def _validate_tgz(path: Path) -> int:
+def _validate_tgz(path: Path, maximum_unpacked_size: int | None) -> int:
     unpacked_size = 0
     names: set[str] = set()
     try:
@@ -233,6 +273,7 @@ def _validate_tgz(path: Path) -> int:
                 if not member.isfile():
                     raise ArchiveError(f"Mailbox TGZ contains an unsupported entry: {member.name}")
                 unpacked_size += member.size
+                _check_unpacked_size(path, unpacked_size, maximum_unpacked_size)
                 stream = archive.extractfile(member)
                 if stream is None:
                     raise ArchiveError(f"Mailbox TGZ member cannot be read: {member.name}")
@@ -244,7 +285,7 @@ def _validate_tgz(path: Path) -> int:
     return unpacked_size
 
 
-def _validate_zip(path: Path) -> int:
+def _validate_zip(path: Path, maximum_unpacked_size: int | None) -> int:
     unpacked_size = 0
     names: set[str] = set()
     try:
@@ -255,9 +296,14 @@ def _validate_zip(path: Path) -> int:
                     raise ArchiveError(f"Mailbox ZIP contains a duplicate entry: {member.filename}")
                 names.add(member.filename)
                 mode = member.external_attr >> 16
-                if stat.S_IFMT(mode) == stat.S_IFLNK:
+                file_type = stat.S_IFMT(mode)
+                if file_type == stat.S_IFLNK:
                     raise ArchiveError(
                         f"Mailbox ZIP contains an unsupported symlink: {member.filename}"
+                    )
+                if file_type not in {0, stat.S_IFREG, stat.S_IFDIR}:
+                    raise ArchiveError(
+                        f"Mailbox ZIP contains an unsupported entry: {member.filename}"
                     )
                 if member.flag_bits & 0x1:
                     raise ArchiveError(
@@ -265,11 +311,31 @@ def _validate_zip(path: Path) -> int:
                     )
                 if not member.is_dir():
                     unpacked_size += member.file_size
+                    _check_unpacked_size(path, unpacked_size, maximum_unpacked_size)
             if corrupt := archive.testzip():
                 raise ArchiveError(f"Mailbox ZIP contains a corrupt member: {corrupt}")
     except (zipfile.BadZipFile, OSError) as exc:
         raise ArchiveError(f"Mailbox export is not a valid ZIP archive: {path.name}") from exc
     return unpacked_size
+
+
+def _check_unpacked_size(
+    path: Path,
+    unpacked_size: int,
+    maximum_unpacked_size: int | None,
+) -> None:
+    if maximum_unpacked_size is not None and unpacked_size > maximum_unpacked_size:
+        raise ArchiveError(f"Mailbox archive expands beyond its recorded size: {path.name}")
+
+
+def _file_identity(value: os.stat_result) -> tuple[int, int, int, int, int]:
+    return (
+        value.st_dev,
+        value.st_ino,
+        value.st_size,
+        value.st_mtime_ns,
+        value.st_ctime_ns,
+    )
 
 
 def _validate_member_path(name: str, archive_label: str) -> None:
@@ -283,8 +349,10 @@ def _reject_encrypted_archive(root: Path) -> None:
         if (root / name).exists():
             raise ArchiveError("Encrypted archives are not supported")
     objects = root / "objects"
+    if objects.is_dir():
+        for directory in objects.iterdir():
+            if directory.is_dir() and next(directory.glob("*.zmenc"), None) is not None:
+                raise ArchiveError("Encrypted archives are not supported")
     mailboxes = root / "mailboxes"
-    if objects.is_dir() and any(objects.rglob("*.zmenc")):
-        raise ArchiveError("Encrypted archives are not supported")
-    if mailboxes.is_dir() and any(mailboxes.rglob("*.zmenc")):
+    if mailboxes.is_dir() and next(mailboxes.glob("*/*.zmenc"), None) is not None:
         raise ArchiveError("Encrypted archives are not supported")

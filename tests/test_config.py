@@ -20,6 +20,7 @@ class ConfigTests(unittest.TestCase):
         self.assertTrue(config.import_options.allows_version("Release 8.8.15.GA FOSS"))
         self.assertTrue(config.import_options.allows_version("Release 9.0.0.GA FOSS"))
         self.assertTrue(config.import_options.allows_version("Release 10.1.18.GA FOSS"))
+        self.assertFalse(config.import_options.allow_unverified_remote_capacity)
 
     def test_removed_archive_encryption_settings_are_rejected(self) -> None:
         config_text = """

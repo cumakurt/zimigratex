@@ -17,6 +17,28 @@ NEVER_EXPORT_ATTRIBUTES = {
     "zimbraCsrfTokenData",
 }
 
+# Account/identity prefs that store a signature UUID. Applied after signatures are
+# created so destination IDs replace source IDs. zimbraPrefMailSignatureContactId is
+# a contact UUID (zimbra-attrs.xml), not a signature UUID, so it is omitted.
+SIGNATURE_REFERENCE_ATTRIBUTES = {
+    "zimbraPrefDefaultSignatureId",
+    "zimbraPrefForwardReplySignatureId",
+    "zimbraPrefCalendarAutoAcceptSignatureId",
+    "zimbraPrefCalendarAutoDeclineSignatureId",
+    "zimbraPrefCalendarAutoDenySignatureId",
+    "zimbraPrefCalendarAcceptSignatureId",
+    "zimbraPrefCalendarTentativeSignatureId",
+    "zimbraPrefCalendarDeclineSignatureId",
+}
+
+# ProvUtil.printAttr emits these as ldapsearch "::" base64. zmprov argv cannot restore
+# DER/JPEG without ldapmodify; applying the LDIF alphabet would corrupt the value.
+LDAP_BINARY_TRANSFER_ATTRIBUTES = {
+    "userCertificate",
+    "userSMIMECertificate",
+    "jpegPhoto",
+}
+
 COMMON_READ_ONLY = {
     "objectClass",
     "zimbraCreateTimestamp",
@@ -36,15 +58,7 @@ COMMON_READ_ONLY = {
     "zimbraGalAccountId",
     "zimbraACE",
     "zimbraSignatureId",
-    "zimbraPrefDefaultSignatureId",
-    "zimbraPrefForwardReplySignatureId",
     "zimbraPrefMailSignatureContactId",
-    "zimbraPrefCalendarAutoAcceptSignatureId",
-    "zimbraPrefCalendarAutoDeclineSignatureId",
-    "zimbraPrefCalendarAutoDenySignatureId",
-    "zimbraPrefCalendarAcceptSignatureId",
-    "zimbraPrefCalendarTentativeSignatureId",
-    "zimbraPrefCalendarDeclineSignatureId",
     "zimbraDataSourceId",
     "zimbraIdentityId",
     "zimbraUCServiceId",
@@ -54,8 +68,8 @@ COMMON_READ_ONLY = {
 }
 
 KIND_READ_ONLY: dict[str, set[str]] = {
-    "account": {"name", "zimbraAccountStatus"},
-    "calendar_resource": {"name", "zimbraAccountStatus"},
+    "account": {"name", "zimbraAccountStatus", *SIGNATURE_REFERENCE_ATTRIBUTES},
+    "calendar_resource": {"name", "zimbraAccountStatus", *SIGNATURE_REFERENCE_ATTRIBUTES},
     "domain": {"name", "zimbraDomainName"},
     "cos": {"name"},
     "distribution_list": {"name"},
@@ -96,7 +110,7 @@ def mutable_attributes(
     allowlist: tuple[str, ...] | None = None,
     allow_sensitive: bool = True,
 ) -> Attributes:
-    blocked = COMMON_READ_ONLY | KIND_READ_ONLY.get(kind, set())
+    blocked = COMMON_READ_ONLY | KIND_READ_ONLY.get(kind, set()) | LDAP_BINARY_TRANSFER_ATTRIBUTES
     allowed = set(allowlist) if allowlist is not None else None
     return {
         name: list(values)

@@ -1,14 +1,17 @@
 from __future__ import annotations
 
+import base64
 import logging
 import re
+from binascii import Error as Base64Error
 from pathlib import Path
 from urllib.parse import quote
 
-from zimigrate.config import EndpointConfig
-from zimigrate.errors import CommandError, CompatibilityError
+from zimigrate.config import EndpointConfig, TransferConfig
+from zimigrate.errors import CommandError, CompatibilityError, ZimigrateError
 from zimigrate.models import Attributes
 from zimigrate.runner import CommandRunner
+from zimigrate.util import is_valid_dns_name
 
 LOGGER = logging.getLogger(__name__)
 ZMPROV = "/opt/zimbra/bin/zmprov"
@@ -16,11 +19,110 @@ ZMMAILBOX = "/opt/zimbra/bin/zmmailbox"
 ZMCONTROL = "/opt/zimbra/bin/zmcontrol"
 ZMHOSTNAME = "/opt/zimbra/bin/zmhostname"
 ZMVOLUME = "/opt/zimbra/bin/zmvolume"
-# ProvUtil follows ldapsearch's double-colon convention for base64-encoded binary
-# attributes. Keep the separator out of the value so it can be supplied back to
-# zmprov as the actual base64 data on the destination.
+# Mailbox.ID_FOLDER_INBOX. zmprov cds requires a folder id; import then applies
+# the archived zimbraDataSourceFolderId after mailbox REST restore.
+ZIMBRA_INBOX_FOLDER_ID = "2"
+# ProvUtil.printAttr follows ldapsearch: binary values are "name:: " plus
+# commons-codec chunked base64. Decode that payload before storing or applying
+# it so zmprov receives the LDAP value ({SSHA}..., plaintext secrets) rather
+# than the LDIF alphabet.
 ATTRIBUTE_LINE = re.compile(r"^([A-Za-z][A-Za-z0-9._-]*)(::?)(?: ?)(.*)$")
+HELP_COMMAND = re.compile(r"^\s*([A-Za-z][A-Za-z0-9]*)\(([^)]+)\)", re.MULTILINE)
 QUERY_SAFE = ":/*@"
+MISSING_OBJECT_MARKERS = (
+    "account.no_such_account",
+    "account.no_such_calendar_resource",
+    "account.no_such_cos",
+    "account.no_such_distribution_list",
+    "account.no_such_domain",
+    "account.no_such_group",
+    "account.no_such_server",
+)
+ALREADY_EXISTS_MARKERS = (
+    "account.account_exists",
+    "account.alias_exists",
+    "account.cos_exists",
+    "account.data_source_exists",
+    "account.distribution_list_exists",
+    "account.domain_exists",
+    "account.identity_exists",
+    "account.member_exists",
+    "account.server_exists",
+    "account.signature_exists",
+)
+
+
+def required_export_commands(transfer: TransferConfig) -> set[str]:
+    commands: set[str] = set()
+    if transfer.include_domains:
+        commands.update({"gad", "gd"})
+    if transfer.include_cos:
+        commands.update({"gac", "gc"})
+    if transfer.include_accounts:
+        commands.update({"gacr", "gaa", "ga", "gcr", "gid", "gsig", "gds"})
+    if transfer.include_distribution_lists:
+        commands.update({"gadl", "gdl", "gdlm"})
+    if transfer.include_global_config:
+        commands.add("gacf")
+    if transfer.include_server_config or transfer.include_mailboxes:
+        commands.update({"gas", "gs"})
+    if transfer.include_mailboxes:
+        commands.add("gqu")
+    return commands
+
+
+def required_import_commands(transfer: TransferConfig) -> set[str]:
+    commands: set[str] = set()
+    if transfer.include_cos:
+        commands.update({"gc", "cc", "mc"})
+    if transfer.include_domains:
+        commands.update({"gd", "cd", "cad", "md"})
+    if transfer.include_accounts:
+        commands.update(
+            {
+                "ga",
+                "gcr",
+                "ca",
+                "ccr",
+                "ma",
+                "mcr",
+                "aaa",
+                "gid",
+                "cid",
+                "mid",
+                "gsig",
+                "csig",
+                "msig",
+                "gds",
+                "cds",
+                "mds",
+                "fc",
+            }
+        )
+    if transfer.include_distribution_lists:
+        commands.update({"gdl", "cdl", "cddl", "mdl", "adla", "gdlm", "adlm"})
+    if transfer.include_global_config:
+        commands.add("mcf")
+    if transfer.include_server_config:
+        commands.update({"gs", "ms"})
+    return commands
+
+
+def required_verification_commands(transfer: TransferConfig) -> set[str]:
+    commands: set[str] = set()
+    if transfer.include_cos:
+        commands.add("gc")
+    if transfer.include_domains:
+        commands.add("gd")
+    if transfer.include_accounts:
+        commands.update({"ga", "gcr", "gid", "gsig", "gds"})
+    if transfer.include_distribution_lists:
+        commands.update({"gdl", "gdlm"})
+    if transfer.include_global_config:
+        commands.add("gacf")
+    if transfer.include_server_config:
+        commands.add("gs")
+    return commands
 
 
 def mailbox_rest_url(
@@ -49,20 +151,56 @@ def mailbox_rest_url(
 
 def parse_attributes(output: str) -> Attributes:
     attributes: Attributes = {}
+    binary_values: dict[str, list[bool]] = {}
     previous: str | None = None
+    previous_binary = False
     for raw_line in output.splitlines():
         if raw_line.startswith("# name "):
             previous = None
+            previous_binary = False
             continue
         match = ATTRIBUTE_LINE.fullmatch(raw_line)
         if not match:
             if previous is not None and attributes[previous]:
-                attributes[previous][-1] += "\n" + raw_line
+                if previous_binary:
+                    attributes[previous][-1] += "".join(raw_line.split())
+                else:
+                    attributes[previous][-1] += "\n" + raw_line
             continue
-        name, _separator, value = match.groups()
+        name, separator, value = match.groups()
+        binary = separator == "::"
+        if binary:
+            value = "".join(value.split())
         attributes.setdefault(name, []).append(value)
+        binary_values.setdefault(name, []).append(binary)
         previous = name
+        previous_binary = binary
+    for name, values in attributes.items():
+        flags = binary_values.get(name, [])
+        attributes[name] = [
+            _decode_ldap_base64(value) if is_binary else value
+            for value, is_binary in zip(values, flags, strict=True)
+        ]
     return attributes
+
+
+def _decode_ldap_base64(value: str) -> str:
+    compact = "".join(value.split())
+    try:
+        decoded = base64.b64decode(compact, validate=True)
+    except (Base64Error, ValueError) as exc:
+        raise ZimigrateError("LDAP binary attribute is not valid base64") from exc
+    return decoded.decode("utf-8") if _is_utf8_text(decoded) else compact
+
+
+def _is_utf8_text(value: bytes) -> bool:
+    if not value or b"\x00" in value:
+        return False
+    try:
+        text = value.decode("utf-8")
+    except UnicodeDecodeError:
+        return False
+    return all(ch == "\t" or ch == "\n" or ch == "\r" or ch.isprintable() for ch in text)
 
 
 def parse_attribute_sections(output: str) -> list[Attributes]:
@@ -178,17 +316,39 @@ class ZimbraClient:
             raise CompatibilityError("zmcontrol -v returned no version")
         return value
 
-    def preflight(self, *, require_mailbox: bool = False) -> str:
+    def preflight(
+        self,
+        *,
+        require_mailbox: bool = False,
+        required_provisioning_commands: set[str] | None = None,
+        required_mailbox_commands: set[str] | None = None,
+        require_mailbox_output: bool = False,
+    ) -> str:
         version = self.version()
-        self.runner.run([ZMPROV, "help", "commands"], retryable=True)
+        provisioning_help = self.runner.run([ZMPROV, "help", "commands"], retryable=True).stdout
+        _require_help_commands(
+            provisioning_help,
+            required_provisioning_commands or set(),
+            utility="zmprov",
+        )
         if require_mailbox:
-            self.runner.run([ZMMAILBOX, "help", "commands"], retryable=True)
+            mailbox_help = self.runner.run([ZMMAILBOX, "help", "commands"], retryable=True).stdout
+            _require_help_commands(
+                mailbox_help,
+                required_mailbox_commands or set(),
+                utility="zmmailbox",
+            )
+            if require_mailbox_output and not re.search(
+                r"(?:^|\s)(?:-o/--output|--output|-o(?:\s|$))",
+                mailbox_help,
+            ):
+                raise CompatibilityError("zmmailbox getRestURL does not support --output")
         return version
 
     def hostname(self) -> str:
         result = self.runner.run([ZMHOSTNAME], retryable=True)
         hostname = result.stdout.strip()
-        if not hostname or "\n" in hostname:
+        if not is_valid_dns_name(hostname):
             raise CompatibilityError("zmhostname returned an invalid host name")
         return hostname
 
@@ -202,13 +362,7 @@ class ZimbraClient:
         return self._list("gaa", ldap=True)
 
     def list_calendar_resources(self) -> list[str]:
-        try:
-            return self._list("gacr", ldap=True)
-        except CommandError:
-            LOGGER.warning(
-                "Source does not support getAllCalendarResources; using account attributes"
-            )
-            return []
+        return self._list("gacr", ldap=True)
 
     def list_distribution_lists(self) -> list[str]:
         return self._list("gadl", ldap=True)
@@ -260,7 +414,8 @@ class ZimbraClient:
     def get_data_sources(self, account: str) -> list[Attributes]:
         return self._get_sections("gds", account, sensitive=True)
 
-    def exists(self, kind: str, name: str) -> bool:
+    def get_optional(self, kind: str, name: str) -> Attributes | None:
+        """Return LDAP attributes, or None when Zimbra reports a missing object."""
         command = {
             "domain": "gd",
             "cos": "gc",
@@ -271,60 +426,107 @@ class ZimbraClient:
             "server": "gs",
         }[kind]
         try:
-            self._get(command, name, ldap=True, sensitive=False, retryable=False)
+            return self._get(command, name, ldap=True, sensitive=True, retryable=True)
         except CommandError as exc:
-            diagnostic = str(exc).lower()
-            missing_markers = ("no such", "not found", "no_such", "account.no_such")
-            if any(marker in diagnostic for marker in missing_markers):
-                return False
+            if is_missing_object_error(exc):
+                return None
             raise
-        return True
+
+    def exists(self, kind: str, name: str) -> bool:
+        return self.get_optional(kind, name) is not None
 
     def create(self, kind: str, name: str, initial_operations: list[str] | None = None) -> None:
         initial_operations = initial_operations or []
-        if kind == "domain":
-            self._zmprov("cd", name, *initial_operations, ldap=True)
-        elif kind == "cos":
-            self._zmprov("cc", name, *initial_operations, ldap=True)
-        elif kind == "account":
-            self._zmprov(
-                "ca",
-                name,
-                "",
-                *initial_operations,
-                ldap=True,
-                sensitive=True,
-                protect_arguments=True,
-            )
-        elif kind == "calendar_resource":
-            self._create_calendar_resource(name, initial_operations)
-        elif kind == "distribution_list":
-            self._zmprov("cdl", name, *initial_operations, ldap=True)
-        elif kind == "dynamic_distribution_list":
-            self._create_dynamic_distribution_list(name, initial_operations)
-        else:
-            raise ValueError(f"Unsupported entity kind: {kind}")
+        try:
+            if kind == "domain":
+                self._zmprov("cd", name, *initial_operations, ldap=True, retryable=True)
+            elif kind == "cos":
+                self._zmprov("cc", name, *initial_operations, ldap=True, retryable=True)
+            elif kind == "account":
+                self._zmprov(
+                    "ca",
+                    name,
+                    "",
+                    *initial_operations,
+                    ldap=True,
+                    retryable=True,
+                    sensitive=True,
+                    protect_arguments=True,
+                )
+            elif kind == "calendar_resource":
+                self._zmprov(
+                    "ccr",
+                    name,
+                    "",
+                    *initial_operations,
+                    ldap=True,
+                    retryable=True,
+                    sensitive=True,
+                    protect_arguments=True,
+                )
+            elif kind == "distribution_list":
+                self._zmprov("cdl", name, *initial_operations, ldap=True, retryable=True)
+            elif kind == "dynamic_distribution_list":
+                self._zmprov("cddl", name, *initial_operations, ldap=True, retryable=True)
+            else:
+                raise ValueError(f"Unsupported entity kind: {kind}")
+        except CommandError as exc:
+            if is_already_exists_error(exc):
+                LOGGER.info(
+                    "Create reported an existing object; continuing",
+                    extra={"kind": kind, "entity": name},
+                )
+                return
+            raise
 
-    def flush_cache(self, cache_type: str, name: str) -> None:
+    def flush_cache(self, cache_type: str, name: str, *, server: str | None = None) -> None:
         """Reload mailboxd LDAP cache after LDAP-direct (`zmprov -l`) writes.
 
         Password hashes and account status written with `-l` update OpenLDAP
         immediately, but mailboxd keeps cached entries for
         `ldap_cache_<type>_maxage` (default 15 minutes). `flushCache` is a SOAP
-        command and must not use `-l`. A flush failure is not fatal: LDAP already
-        has the restored values and cache expiry will catch up.
+        command and must not use `-l`. The account's `zimbraMailHost` is flushed
+        first (`zmprov -s host:port`) so a remote store does not keep the empty
+        password or maintenance status. Local SOAP is the fallback. If both
+        attempts fail, activation must stop rather than leave cache state unknown.
         """
         try:
-            self._zmprov("fc", cache_type, name, ldap=False, retryable=True)
+            self._flush_cache_once(cache_type, name, server=server)
+            return
         except CommandError as exc:
-            LOGGER.warning(
-                "Could not flush %s cache for %s; mailboxd may use cached LDAP data "
-                "until ldap_cache_%s_maxage expires",
+            if server:
+                LOGGER.warning(
+                    "Could not flush %s cache for %s on %s; retrying on the local SOAP server",
+                    cache_type,
+                    name,
+                    server,
+                    extra={"detail": str(exc)},
+                )
+                try:
+                    self._flush_cache_once(cache_type, name, server=None)
+                    return
+                except CommandError as fallback_error:
+                    exc = fallback_error
+            LOGGER.error(
+                "Could not flush %s cache for %s; account activation cannot continue",
                 cache_type,
                 name,
-                cache_type,
                 extra={"detail": str(exc)},
             )
+            raise exc
+
+    def _flush_cache_once(self, cache_type: str, name: str, *, server: str | None) -> None:
+        soap_server = None
+        if server:
+            soap_server = f"{_require_mailbox_host(server)}:{self.endpoint.mailbox_admin_port}"
+        self._zmprov(
+            "fc",
+            cache_type,
+            name,
+            ldap=False,
+            retryable=True,
+            soap_server=soap_server,
+        )
 
     def modify(self, kind: str, name: str, operations: list[str], *, sensitive: bool) -> None:
         command = {
@@ -358,66 +560,44 @@ class ZimbraClient:
             )
 
     def add_account_alias(self, account: str, alias: str) -> None:
-        self._zmprov("aaa", account, alias, ldap=True)
+        self._add_idempotent("aaa", account, alias)
 
     def add_distribution_alias(self, distribution_list: str, alias: str) -> None:
-        self._zmprov("adla", distribution_list, alias, ldap=True)
+        self._add_idempotent("adla", distribution_list, alias)
 
     def add_distribution_member(self, distribution_list: str, member: str) -> None:
-        self._zmprov("adlm", distribution_list, member, ldap=True)
+        self._add_idempotent("adlm", distribution_list, member)
 
     def create_alias_domain(self, alias_domain: str, target_domain: str) -> None:
-        self._zmprov("cad", alias_domain, target_domain, ldap=True)
-
-    def _create_calendar_resource(self, name: str, operations: list[str]) -> None:
         try:
-            self._zmprov(
-                "ccr",
-                name,
-                "",
-                *operations,
-                ldap=True,
-                sensitive=True,
-                protect_arguments=True,
-            )
-            return
+            self._zmprov("cad", alias_domain, target_domain, ldap=True, retryable=True)
         except CommandError as exc:
-            legacy = _legacy_calendar_resource_arguments(operations)
-            if legacy is None or not _looks_like_syntax_error(exc):
-                raise
-            LOGGER.warning(
-                "createCalendarResource rejected attribute syntax; retrying positional form",
-                extra={"entity": name},
-            )
-            self._zmprov(
-                "ccr",
-                name,
-                "",
-                *legacy,
-                ldap=True,
-                sensitive=True,
-                protect_arguments=True,
-            )
+            if is_already_exists_error(exc):
+                LOGGER.info(
+                    "Alias domain already exists; continuing",
+                    extra={"entity": alias_domain},
+                )
+                return
+            raise
 
-    def _create_dynamic_distribution_list(self, name: str, operations: list[str]) -> None:
+    def _add_idempotent(self, command: str, owner: str, value: str) -> None:
         try:
-            self._zmprov("cddl", name, *operations, ldap=True)
-            return
+            self._zmprov(command, owner, value, ldap=True, retryable=True)
         except CommandError as exc:
-            if not _looks_like_unknown_command(exc):
-                raise
-            LOGGER.warning(
-                "createDynamicDistributionList is unavailable; creating a group with "
-                "zimbraIsDynamicGroup",
-                extra={"entity": name},
-            )
-            extra = operations
-            if "zimbraIsDynamicGroup" not in operations:
-                extra = [*operations, "zimbraIsDynamicGroup", "TRUE"]
-            self._zmprov("cdl", name, *extra, ldap=True)
+            if is_already_exists_error(exc):
+                return
+            raise
+
+    def _create_account_child(self, command: str, account: str, name: str) -> None:
+        try:
+            self._zmprov(command, account, name, ldap=True, retryable=True)
+        except CommandError as exc:
+            if is_already_exists_error(exc):
+                return
+            raise
 
     def create_signature(self, account: str, name: str) -> None:
-        self._zmprov("csig", account, name, ldap=True)
+        self._create_account_child("csig", account, name)
 
     def modify_signature(
         self, account: str, name: str, operations: list[str], *, sensitive: bool
@@ -434,7 +614,7 @@ class ZimbraClient:
         )
 
     def create_identity(self, account: str, name: str) -> None:
-        self._zmprov("cid", account, name, ldap=True)
+        self._create_account_child("cid", account, name)
 
     def modify_identity(
         self, account: str, name: str, operations: list[str], *, sensitive: bool
@@ -453,19 +633,25 @@ class ZimbraClient:
     def create_data_source(
         self, account: str, source_type: str, name: str, enabled: str, folder_id: str
     ) -> None:
-        self._zmprov(
-            "cds",
-            account,
-            source_type,
-            name,
-            "zimbraDataSourceEnabled",
-            enabled,
-            "zimbraDataSourceFolderId",
-            folder_id,
-            ldap=True,
-            sensitive=True,
-            protect_arguments=True,
-        )
+        try:
+            self._zmprov(
+                "cds",
+                account,
+                source_type,
+                name,
+                "zimbraDataSourceEnabled",
+                enabled,
+                "zimbraDataSourceFolderId",
+                folder_id,
+                ldap=True,
+                retryable=True,
+                sensitive=True,
+                protect_arguments=True,
+            )
+        except CommandError as exc:
+            if is_already_exists_error(exc):
+                return
+            raise
 
     def modify_data_source(
         self, account: str, name: str, operations: list[str], *, sensitive: bool
@@ -497,22 +683,7 @@ class ZimbraClient:
             empty_name=f"mailbox.{archive_format}",
         )
         options = self._mailbox_options(account, mailbox_host)
-        try:
-            self._export_mailbox_to_path(options, url, output_path)
-        except CommandError as exc:
-            if not lock_mailbox or not _looks_like_unsupported_option(exc, "lock"):
-                raise
-            LOGGER.warning(
-                "Mailbox lock is not supported; exporting without lock",
-                extra={"account": account},
-            )
-            unlocked = mailbox_rest_url(
-                archive_format,
-                query=query,
-                lock=False,
-                empty_name=f"mailbox.{archive_format}",
-            )
-            self._export_mailbox_to_path(options, unlocked, output_path)
+        self._export_mailbox_to_path(options, url, output_path)
 
     def import_mailbox(
         self,
@@ -553,12 +724,14 @@ class ZimbraClient:
     def _mailbox_options(self, account: str, mailbox_host: str | None) -> list[str]:
         options = ["-z"]
         if mailbox_host:
-            if not re.fullmatch(r"[A-Za-z0-9_.-]+", mailbox_host):
-                raise CompatibilityError(f"Account {account} has an invalid zimbraMailHost value")
+            host = _require_mailbox_host(
+                mailbox_host,
+                detail=f"Account {account} has an invalid zimbraMailHost value",
+            )
             options.extend(
                 [
                     "-u",
-                    f"{self.endpoint.mailbox_admin_scheme}://{mailbox_host}:"
+                    f"{self.endpoint.mailbox_admin_scheme}://{host}:"
                     f"{self.endpoint.mailbox_admin_port}",
                 ]
             )
@@ -597,10 +770,13 @@ class ZimbraClient:
         retryable: bool = False,
         sensitive: bool = False,
         protect_arguments: bool = False,
+        soap_server: str | None = None,
     ) -> str:
         command_line = [ZMPROV]
         if ldap:
             command_line.append("-l")
+        if soap_server is not None:
+            command_line.extend(["-s", soap_server])
         input_data = None
         if protect_arguments:
             command_line.extend(["-f", "/dev/stdin"])
@@ -630,68 +806,37 @@ def _quota_fields(fields: list[str]) -> tuple[int, int] | None:
     return None
 
 
+def _require_help_commands(output: str, required: set[str], *, utility: str) -> None:
+    if not required:
+        return
+    available: set[str] = set()
+    for long_name, aliases in HELP_COMMAND.findall(output):
+        available.add(long_name.casefold())
+        available.update(alias.strip().casefold() for alias in aliases.split(","))
+    missing = sorted(command for command in required if command.casefold() not in available)
+    if missing:
+        raise CompatibilityError(f"{utility} does not provide required command: {missing[0]}")
+
+
 def _looks_like_quota_header(fields: list[str]) -> bool:
     first = fields[0].casefold().strip(":")
     return first in {"account", "name", "quota", "usage", "used", "email"}
 
 
-def _legacy_calendar_resource_arguments(operations: list[str]) -> list[str] | None:
-    if not operations or len(operations) % 2:
-        return None
-    display = ""
-    resource_type = ""
-    remaining: list[str] = []
-    for name, value in zip(operations[::2], operations[1::2], strict=True):
-        if name == "displayName" and not display:
-            display = value
-        elif name == "zimbraCalResType" and not resource_type:
-            resource_type = value
-        else:
-            remaining.extend([name, value])
-    if not display and not resource_type:
-        return None
-    return [display or "Calendar Resource", resource_type or "Location", *remaining]
+def _require_mailbox_host(value: str, *, detail: str | None = None) -> str:
+    if not is_valid_dns_name(value):
+        raise CompatibilityError(detail or f"Invalid zimbraMailHost value: {value}")
+    return value
 
 
-def _looks_like_syntax_error(error: CommandError) -> bool:
-    text = str(error).casefold()
-    return any(
-        marker in text
-        for marker in (
-            "usage",
-            "syntax",
-            "invalid attribute",
-            "unknown attribute",
-            "missing required",
-            "wrong number of arguments",
-            "too many arguments",
-        )
-    )
+def is_missing_object_error(error: CommandError) -> bool:
+    diagnostic = str(error).casefold()
+    return any(marker in diagnostic for marker in MISSING_OBJECT_MARKERS)
 
 
-def _looks_like_unknown_command(error: CommandError) -> bool:
-    text = str(error).casefold()
-    return any(
-        marker in text
-        for marker in ("unknown command", "invalid command", "no such command", "not a command")
-    )
-
-
-def _looks_like_unsupported_option(error: CommandError, option: str) -> bool:
-    text = str(error).casefold()
-    if option.casefold() not in text:
-        return False
-    return any(
-        marker in text
-        for marker in (
-            "unknown parameter",
-            "unknown option",
-            "invalid argument",
-            "invalid option",
-            "unrecognized",
-            "not supported",
-        )
-    )
+def is_already_exists_error(error: CommandError) -> bool:
+    diagnostic = str(error).casefold()
+    return any(marker in diagnostic for marker in ALREADY_EXISTS_MARKERS)
 
 
 def _batch_line(arguments: list[str]) -> str:

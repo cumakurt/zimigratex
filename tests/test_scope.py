@@ -3,12 +3,13 @@ from __future__ import annotations
 import unittest
 
 from zimigrate.config import TransferConfig
-from zimigrate.errors import ConfigurationError
+from zimigrate.errors import ConfigurationError, ZimigrateError
 from zimigrate.models import EntityRecord
 from zimigrate.scope import (
     apply_scope_to_transfer,
     filter_cos_records,
     filter_domain_records,
+    parse_bound_scope,
     parse_target_scope,
     selected_accounts,
     selected_names,
@@ -105,6 +106,18 @@ class TargetScopeTests(unittest.TestCase):
             scope=parse_target_scope(["user@example.com"], []),
         )
         self.assertEqual([record.name for record in kept], ["default"])
+
+    def test_bound_scope_rejects_corrupt_checkpoint_json(self) -> None:
+        with self.assertRaises(ZimigrateError):
+            parse_bound_scope("{")
+        with self.assertRaises(ZimigrateError):
+            parse_bound_scope("[]")
+        self.assertFalse(parse_bound_scope(None).active)
+        self.assertTrue(
+            parse_bound_scope('{"target_users":["user@example.com"]}').matches_account(
+                "user@example.com"
+            )
+        )
 
 
 if __name__ == "__main__":

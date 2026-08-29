@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import getpass
 import logging
+import secrets
 import subprocess  # nosec B404
 import time
 from pathlib import Path
@@ -57,6 +58,8 @@ class CommandRunner:
                 if attempt == attempts or not exc.retryable:
                     raise
                 delay = self.retry_base_seconds * (2 ** (attempt - 1))
+                # Full jitter keeps parallel workers from retrying LDAP/SOAP in lockstep.
+                delay = delay * (secrets.randbits(32) / 0xFFFFFFFF) if delay else 0.0
                 LOGGER.warning(
                     "Command failed; retrying",
                     extra={"attempt": attempt, "max_attempts": attempts, "delay": delay},

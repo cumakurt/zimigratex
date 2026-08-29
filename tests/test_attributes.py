@@ -29,6 +29,43 @@ class AttributeTests(unittest.TestCase):
             {"displayName": ["Example User"], "userPassword": ["{SSHA}hash"]},
         )
 
+    def test_identity_signature_prefs_are_mutable_account_prefs_are_deferred(self) -> None:
+        self.assertEqual(
+            mutable_attributes(
+                "account",
+                {
+                    "displayName": ["Example User"],
+                    "zimbraPrefDefaultSignatureId": ["source-sig"],
+                },
+            ),
+            {"displayName": ["Example User"]},
+        )
+        self.assertEqual(
+            mutable_attributes(
+                "identity",
+                {
+                    "zimbraPrefFromAddress": ["user@example.com"],
+                    "zimbraPrefDefaultSignatureId": ["source-sig"],
+                },
+            ),
+            {
+                "zimbraPrefFromAddress": ["user@example.com"],
+                "zimbraPrefDefaultSignatureId": ["source-sig"],
+            },
+        )
+
+    def test_ldap_binary_transfer_attributes_are_not_applied_through_zmprov(self) -> None:
+        result = mutable_attributes(
+            "account",
+            {
+                "displayName": ["Example User"],
+                "jpegPhoto": ["/9j/4AAQ"],
+                "userCertificate": ["MIIB"],
+            },
+        )
+
+        self.assertEqual(result, {"displayName": ["Example User"]})
+
     def test_flatten_operations_replaces_then_adds_multivalues(self) -> None:
         self.assertEqual(
             flatten_operations([("zimbraMailForwardingAddress", ["a@x", "b@x"])]),

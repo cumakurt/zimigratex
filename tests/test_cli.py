@@ -9,7 +9,6 @@ from unittest.mock import MagicMock, patch
 from zimigrate.cli import DEFAULT_ARCHIVE, build_parser, main
 from zimigrate.config import (
     AppConfig,
-    ArchiveConfig,
     EndpointConfig,
     ImportConfig,
     TransferConfig,
@@ -37,7 +36,7 @@ class CliTests(unittest.TestCase):
         self.assertEqual(scoped.domain, ["other.com"])
 
     def test_export_uses_local_defaults_without_starting_import(self) -> None:
-        config = _unencrypted_config()
+        config = _config()
         archive = MagicMock()
         archive.lock.return_value = nullcontext()
         exporter = MagicMock()
@@ -57,14 +56,13 @@ class CliTests(unittest.TestCase):
         load_config.assert_called_once_with(None)
         migration_archive.assert_called_once_with(
             DEFAULT_ARCHIVE,
-            config.archive,
             create=True,
         )
         exporter.run.assert_called_once_with()
         importer.assert_not_called()
 
     def test_export_user_flag_limits_transfer_scope(self) -> None:
-        config = _unencrypted_config()
+        config = _config()
         archive = MagicMock()
         archive.manifest.return_value = None
         archive.lock.return_value = nullcontext()
@@ -94,7 +92,7 @@ class CliTests(unittest.TestCase):
     def test_invalid_user_flag_is_rejected(self) -> None:
         with (
             patch("zimigrate.cli.configure_logging"),
-            patch("zimigrate.cli.load_config", return_value=_unencrypted_config()),
+            patch("zimigrate.cli.load_config", return_value=_config()),
             redirect_stderr(io.StringIO()) as stderr,
         ):
             result = main(["export", "--user", "not-an-email"])
@@ -102,7 +100,7 @@ class CliTests(unittest.TestCase):
         self.assertIn("Invalid --user value", stderr.getvalue())
 
     def test_import_validates_every_artifact_before_starting_import(self) -> None:
-        config = _unencrypted_config()
+        config = _config()
         archive = MagicMock()
         archive.root = DEFAULT_ARCHIVE.resolve()
         archive.lock.return_value = nullcontext()
@@ -132,7 +130,7 @@ class CliTests(unittest.TestCase):
         verifier.assert_called_once_with(archive, deep=True, workers=config.transfer.workers)
 
     def test_failed_import_validation_prevents_target_mutation(self) -> None:
-        config = _unencrypted_config()
+        config = _config()
         archive = MagicMock()
         archive.lock.return_value = nullcontext()
 
@@ -153,11 +151,10 @@ class CliTests(unittest.TestCase):
         importer.assert_not_called()
 
 
-def _unencrypted_config() -> AppConfig:
+def _config() -> AppConfig:
     return AppConfig(
         source=EndpointConfig(),
         target=EndpointConfig(),
-        archive=ArchiveConfig(),
         transfer=TransferConfig(include_secrets=False),
         import_options=ImportConfig(),
     )

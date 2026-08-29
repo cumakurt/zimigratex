@@ -38,7 +38,9 @@ def decrypt_data_source_secrets(attributes: Attributes) -> Attributes:
 
 def _decrypt_secret(value: str, data_source_id: str) -> str:
     try:
-        payload = base64.b64decode(value, validate=True)
+        # DataSource.decryptData uses Apache Commons Base64.decodeBase64, which
+        # ignores whitespace from ProvUtil's 76-column :: wrapping.
+        payload = base64.b64decode("".join(value.split()), validate=False)
         if len(payload) < 1 + SALT_SIZE + (AES_BLOCK_BITS // 8):
             raise ValueError("encoded value is too short")
         if payload[0] != ENCODING_VERSION:

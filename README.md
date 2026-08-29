@@ -30,7 +30,9 @@ Zimbra installation, and creates:
 If the process is interrupted, `Ctrl+C` stops in-flight Zimbra commands immediately.
 Rerun `./export.sh` or `zimigrate export` from the same directory to resume.
 Successful units are skipped and incomplete units resume. Export completion never
-starts an import.
+starts an import. Resume is bound to the original source host, Zimbra version, scope,
+and export options. A successful checkpoint is reused only while its record and every
+referenced mailbox artifact still match their recorded checksum and size.
 
 ## Backup a domain or one account
 
@@ -86,16 +88,20 @@ Then run:
 /path/to/zimigratex/import.sh
 ```
 
-The command performs a complete validation before any
-destination change. It reads every record, checks SHA-256 values, scans every ZIP/TGZ
-mailbox archive, and verifies manifest counts. Only after all checks pass does it run
-destination command preflight and begin the local import. A validation failure exits
-without constructing the importer or changing the destination.
+The command performs a complete validation before any destination change. It requires
+the original SQLite checkpoint database, verifies every provisioning-record and mailbox
+SHA-256 value, rejects unreferenced files, scans every ZIP/TGZ mailbox archive, and
+checks manifest counts. Only after all checks pass does it verify every required
+`zmprov`/`zmmailbox` command and begin the local import. A validation or capability
+failure exits before changing the destination.
 
 After validation, import displays the archive categories for selection. Global and server
 settings require their explicit allowlists. Before any target mutation, current
 `zmvolume -l` message/index volumes and temporary space are checked. Insufficient space
-aborts the import and writes `export_data/reports/import-disk-assessment.json`.
+aborts the import and writes `export_data/reports/import-disk-assessment.json`. A local
+process cannot measure a mapped remote mailbox host, so such a mapping aborts by default.
+`allow_unverified_remote_capacity = true` is an explicit operator acceptance and must be
+used only after checking every remote message and index volume.
 
 Interrupted imports resume with the same command. A successful import automatically
 compares destination objects, portable attributes, aliases, identities, signatures,
@@ -105,7 +111,8 @@ data sources, distribution members, and mailbox checkpoints with the archive:
 ./import.sh
 ```
 
-The same target verification can be repeated independently:
+The same target verification can be repeated independently. It reads the import-bound
+category, mapping, and optional-configuration policies from the checkpoint database:
 
 ```bash
 zimigrate verify-target
@@ -138,13 +145,14 @@ IDs, ports, and LDAP/MTA settings that are unsafe to copy blindly.
 Zimbra stores four data-source credential fields encoded against the source
 `zimbraDataSourceId`. Export decodes those fields using Zimbra's long-standing
 LDAP encoding only inside the process, writes the plaintext into the archive,
-and lets the destination encrypt it against its newly generated data-source ID. Copying
-the LDAP ciphertext directly would create unusable credentials.
+and lets the destination encrypt it against its newly generated data-source ID. During
+restore, each data source stays disabled until all attributes and credentials have been
+applied. Copying the LDAP ciphertext directly would create unusable credentials.
 
 ## Requirements
 
 - Python 3.11 or newer and the Python `rich` package;
-- a 64-bit x86_64 glibc Linux host that Zimbra FOSS supports (RHEL 7–9, Ubuntu 18.04–24.04 LTS, Oracle Linux, Rocky Linux);
+- a 64-bit x86_64 glibc Linux host supported by the installed Zimbra release;
 - `zimigrate` installed on both the source and destination servers;
 - `/opt/zimbra/bin/zmprov`, `zmmailbox`, `zmcontrol`, and `zmhostname` locally available;
 - execution as the `zimbra` user, or local `sudo -n -u zimbra` permission;
@@ -246,6 +254,9 @@ connection, and timeout errors are never downgraded to attribute warnings. Year 
 use numeric UTC epoch boundaries so their ranges neither overlap nor depend on account
 locale. With `mailbox_conflict_resolution = "reset"`, only the first chunk resets the
 mailbox; later chunks use the idempotent `skip` policy so an earlier chunk is not erased.
+Mailbox export requests Zimbra REST `meta=1` and, by default, `lock=1`. If the installed
+Zimbra build rejects the requested lock, export stops; it never silently retries an
+unlocked snapshot. Set `mailbox_lock = false` only for a controlled maintenance window.
 
 `--archive` is also retained for advanced layouts:
 
@@ -260,12 +271,19 @@ they cannot silently change during a resume.
 
 ## Reliability and security
 
-The archive uses SHA-256 checksums, atomic writes, `0600` files, a `0700` directory,
-and SQLite checkpoints. Records and mailbox payloads are stored in plaintext. Worker
-submission and execution are bounded, and only classified transient command failures use
-limited exponential retries. Temporary mailbox chunks exist only under `export_data/.tmp`
-while being processed and are removed afterward. Sensitive `zmprov` values use stdin
-batch input instead of process arguments.
+The archive uses SHA-256 checksums for provisioning records and mailbox payloads, atomic
+writes, `0600` files, a `0700` directory, and a required SQLite checkpoint database.
+Records and mailbox payloads are stored in plaintext. Worker submission and execution
+are bounded, and only classified transient command failures use limited exponential
+retries. Temporary mailbox chunks exist only under `export_data/.tmp` while being
+processed and are removed afterward. Sensitive `zmprov` values use stdin batch input
+instead of process arguments.
+
+The mailbox protocol follows Zimbra's
+[REST export/import reference](https://github.com/Zimbra/zm-mailbox/blob/develop/store/docs/rest.txt),
+and provisioning commands are checked against the installed utilities before use. The
+[official command-line guide](https://github.com/Zimbra/adminguide/blob/develop/cmdlineutils.adoc)
+is the operational reference for `zmprov`, `zmmailbox`, and cache commands.
 
 Do not copy an archive while `zimigrate` is running. Keep the directory on trusted,
 preferably disk-encrypted storage. A copied archive contains account names, password
@@ -277,14 +295,24 @@ See [SECURITY.md](SECURITY.md) for details.
 - This is an application-level migration, not a physical LDAP/MariaDB/blob restore.
 - Certificates, private key files, `zmlocalconfig`, OS packages, MTA queues, DNS,
   firewall rules, and commercial Network Edition backup state are not installed.
+  Account `jpegPhoto`, `userCertificate`, and `userSMIMECertificate` are LDAP binary
+  values; `zmprov` cannot restore DER/JPEG through argv, so import skips them.
+- Signature default IDs are remapped after destination signatures are created.
+  `zimbraPrefMailSignatureContactId` is a contact UUID and is left unset on the target.
 - Cross-mailbox share IDs and topology-specific IDs can change. Validate delegated
   folders and recreate grants when necessary.
+- Target verification compares provisioning state and successful mailbox REST import
+  checkpoints; it does not perform an item-by-item mailbox content comparison.
 - A live source can change during export. Use a maintenance/freeze window for the final
   run; mailbox REST export is not a cluster-wide transactional snapshot.
 - Import disk assessment uses each archive member's expanded size, not only its compressed
   ZIP/TGZ size. In a multi-mailbox destination, paths on a remote mailbox host cannot be
-  measured through the local filesystem; confirm free space on every mapped host before
-  cutover.
+  measured through the local filesystem. Import rejects mapped remote hosts unless the
+  operator explicitly accepts that limitation after checking every mapped host.
+- Year-chunk mailbox export filters with Zimbra `DateQuery` numeric UTC epoch milliseconds
+  (`date:<` / `date:>=`), not locale `mm/dd/yyyy`. REST query export can omit empty folders
+  and items without a searchable date the same way Zimbra search does; `mailbox_mode = "full"`
+  is the most complete snapshot.
 - Destination version pinning is optional. By default any local Zimbra release that can
   run `zmprov`/`zmmailbox`/`zmcontrol` is accepted; set
   `import.expected_target_version_pattern` only when the operator wants to require a

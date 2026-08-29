@@ -37,7 +37,10 @@ Export sırasında `Ctrl+C` çalışan Zimbra komutlarını hemen durdurur. Ayn�
 ```
 
 Başarılı tamamlanan hesaplar ve mailbox parçaları atlanır; yalnızca eksik veya hatalı
-kalan işlemler devam eder. Export tamamlanınca import otomatik başlamaz.
+kalan işlemler devam eder. Devam işlemi kaynak hosta, Zimbra sürümüne, kapsama ve export
+seçeneklerine bağlıdır. Başarılı bir checkpoint yalnızca kayıt dosyası ve bağlı bütün
+mailbox parçaları kaydedilmiş checksum ve boyutla hâlâ eşleşiyorsa atlanır. Export
+tamamlanınca import otomatik başlamaz.
 
 ## Bir domain veya tek hesap yedekleme
 
@@ -93,16 +96,20 @@ Ardından yalnızca şu komutu çalıştırın:
 /path/to/zimigratex/import.sh
 ```
 
-Komut hedef Zimbra üzerinde
-herhangi bir değişiklik yapmadan önce `export_data` içindeki bütün aktarım kayıtlarını
-ve mailbox arşivlerini doğrular. Doğrulamanın tamamı başarılı olursa bulunduğu makinedeki
-Zimbra sürümünü kontrol eder ve yerel import işlemini başlatır.
+Komut hedef Zimbra üzerinde herhangi bir değişiklik yapmadan önce özgün SQLite checkpoint
+veritabanını, bütün aktarım kayıtlarının ve mailbox dosyalarının SHA-256 değerlerini,
+manifest sayılarını ve ZIP/TGZ yapılarını doğrular; bağlantısız dosyaları reddeder.
+Ardından ihtiyaç duyulan her `zmprov`/`zmmailbox` komutunun kurulu sürümde bulunduğunu
+kontrol eder. Bu denetimlerin tamamı başarılı olursa yerel import işlemini başlatır.
 
 Arşiv doğrulamasından sonra import da aynı kategori menüsünü gösterir. Global ve sunucu
 ayarları yalnızca açık allowlist ile seçilebilir. Hedefteki `zmvolume -l` message/index
 volume yolları ile geçici alan, herhangi bir hedef değişikliğinden önce kontrol edilir.
 Yetersiz alan varsa import durur; rapor `export_data/reports/import-disk-assessment.json`
-dosyasına yazılır.
+dosyasına yazılır. Yerel proses eşlenen uzak bir mailbox hostun diskini ölçemediği için
+böyle bir eşleme varsayılan olarak importu durdurur. Her uzak message/index volume ayrı
+olarak denetlendikten sonra sorumluluğu açıkça kabul etmek için
+`allow_unverified_remote_capacity = true` kullanılabilir.
 
 Import kesilirse aynı dizinde tekrar çalıştırın:
 
@@ -113,7 +120,8 @@ Import kesilirse aynı dizinde tekrar çalıştırın:
 Tamamlanan aşamalar SQLite checkpoint üzerinden atlanır. Import bittikten sonra hedef
 nesneler, taşınabilir öznitelikler, alias'lar, kimlikler, imzalar, veri kaynakları,
 dağıtım listesi üyeleri ve mailbox checkpoint'leri otomatik olarak arşivle
-karşılaştırılır. Aynı doğrulamayı daha sonra bağımsız çalıştırmak için:
+karşılaştırılır. Bağımsız doğrulama kategori, eşleme ve opsiyonel yapılandırma
+politikalarını checkpoint'ten okur. Daha sonra tekrar çalıştırmak için:
 
 ```bash
 zimigrate verify-target
@@ -125,17 +133,20 @@ aşamaları başarıyla bittikten sonra yapılır. Hesap oluşturma ve parola ha
 `zmprov -l` ile doğrudan LDAP'e yazılır, böylece Zimbra `{SSHA}` değerini düz metin
 gibi yeniden hash'lemez. Bu yazımdan sonra zimigrate SOAP `zmprov fc account`
 çalıştırır; mailboxd önbelleğindeki boş parola veya `maintenance` durumu
-`ldap_cache_account_maxage` (varsayılan 15 dakika) dolana kadar kullanılmaz.
+`ldap_cache_account_maxage` (varsayılan 15 dakika) dolana kadar kullanılmaz. Cache
+yenilemesi başarısız olursa import durur ve hesap tekrar `maintenance` durumuna alınır.
 
 ## Import öncesi yapılan doğrulamalar
 
 `zimigrate import`, aşağıdaki kontrollerin hepsini import başlamadan önce yapar:
 
 - Manifestin tamamlanmış ve desteklenen şemada olması
+- Özgün `state.sqlite3` checkpoint veritabanının mevcut ve sağlam olması
 - Her domain, COS, hesap, kaynak ve dağıtım listesi kaydının okunabilmesi
+- Her provisioning kaydının checkpoint SHA-256 değeriyle eşleşmesi
 - Manifestteki nesne sayılarıyla bulunan nesne sayılarının eşleşmesi
-- Her mailbox dosyasının SHA-256 değerinin eşleşmesi
-- Mailbox dosyasının içerik SHA-256 değerinin eşleşmesi
+- Her mailbox dosyasının kaydedilmiş boyut ve SHA-256 değeriyle eşleşmesi
+- Manifest veya kayıtlarda referansı olmayan nesne/mailbox dosyalarının bulunmaması
 - Bütün ZIP/TGZ dosyalarının açılabilir, bozulmamış ve güvenli dosya yollarına sahip
   olması
 
@@ -168,14 +179,15 @@ domainler, COS'lar, dağıtım listeleri ve mailbox içerikleri varsayılan akı
 Zimbra dört veri kaynağı credential alanını kaynak `zimbraDataSourceId` değerine bağlı
 biçimde kodlar. Export bu alanları yalnızca proses içinde Zimbra'nın uzun süredir
 kullandığı LDAP kodlamasıyla çözer, plaintext'i arşive yazar ve hedefin
-yeni veri kaynağı ID'si ile yeniden şifrelemesini sağlar. LDAP ciphertext'ini doğrudan
-kopyalamak kullanılamayan credential üretirdi.
+yeni veri kaynağı ID'si ile yeniden şifrelemesini sağlar. Import sırasında veri kaynağı,
+bütün öznitelik ve credential değerleri uygulanana kadar kapalı tutulur. LDAP ciphertext'ini
+doğrudan kopyalamak kullanılamayan credential üretirdi.
 
 ## Gereksinimler
 
 - Python 3.11 veya üzeri
 - Python `rich` paketi
-- Zimbra FOSS'un desteklediği 64-bit x86_64 glibc Linux (RHEL 7–9, Ubuntu 18.04–24.04 LTS, Oracle Linux, Rocky Linux)
+- Kurulu Zimbra sürümünün desteklediği 64-bit x86_64 glibc Linux
 - `zimigrate` paketinin hem kaynak hem hedef sunucuda kurulu olması
 - Yerel sunucuda `/opt/zimbra/bin/zmprov`, `zmmailbox`, `zmcontrol` ve `zmhostname`
 - `zimbra` kullanıcısı olarak çalışma veya yerel `sudo -n -u zimbra` yetkisi
@@ -223,8 +235,9 @@ python3 -m venv .venv
 python -m pip install .
 ```
 
-Export ve import, envanter keşfi, disk kontrolü ve her domain/hesap/mailbox işlemi
-sırasında canlı ilerlemeyi terminale yazar.
+Export ve import etkileşimli terminalde host, envanter, disk durumu ve aşama ilerlemesini
+aynı ekranda güncelleyen canlı bir panel gösterir. `--verbose`, `--json-logs`, TTY olmayan
+çıktı, `TERM=dumb` veya `ZIMIGRATE_PLAIN_OUTPUT=1` klasik satır tabanlı logları kullanır.
 
 Varsayılan kullanım için yapılandırma dosyası gerekmez. Export kaynak makinedeki, import
 ise hedef makinedeki yerel Zimbra komutlarını çalıştırır. Uygulama hiçbir hedefe SSH
@@ -286,6 +299,10 @@ locale'den bağımsız UTC epoch sınırları kullanır ve çakışmaz. Conflict
 ise yalnızca ilk parça mailbox'ı sıfırlar; sonraki parçalar önceki veriyi silmemek ve
 resume'u güvenli tutmak için `skip` kullanır.
 
+Mailbox export, Zimbra REST'e `meta=1` ve varsayılan olarak `lock=1` gönderir. Kurulu
+Zimbra sürümü istenen lock seçeneğini reddederse export kilitsiz biçimde sessizce devam
+etmez; durur. `mailbox_lock = false` yalnızca denetimli bir bakım penceresinde kullanılmalıdır.
+
 Varsayılan `export_data` yolu da gerekirse değiştirilebilir:
 
 ```bash
@@ -300,14 +317,20 @@ checkpoint'e bağlanır ve devam eden bir import sırasında sessizce değiştir
 ## Güvenlik ve güvenilirlik
 
 - Kayıtlar ve mailbox içerikleri düz metin olarak saklanır.
-- SHA-256 bütünlük değerleri tutulur.
+- Provisioning kayıtları ve mailbox dosyaları için SHA-256 bütünlük değerleri tutulur.
 - Arşiv dizini `0700`, hassas dosyalar `0600` izinleriyle oluşturulur.
 - Dosyalar atomik olarak yazılır.
-- Her bağımsız işlem SQLite checkpoint'e kaydedilir.
+- Özgün SQLite checkpoint veritabanı zorunludur; her bağımsız işlem buraya kaydedilir.
 - Worker havuzları sınırlıdır; kontrolsüz thread oluşturulmaz.
 - Hassas `zmprov` değerleri proses argümanları yerine stdin batch akışından verilir.
 - Geçici mailbox parçaları yalnızca işlem sırasında `export_data/.tmp` altında tutulur
   ve sonra kaldırılır.
+
+Mailbox protokolü Zimbra'nın
+[resmî REST export/import referansını](https://github.com/Zimbra/zm-mailbox/blob/develop/store/docs/rest.txt)
+izler. `zmprov`, `zmmailbox` ve cache komutları için operasyonel dayanak
+[resmî komut satırı kılavuzudur](https://github.com/Zimbra/adminguide/blob/develop/cmdlineutils.adoc);
+uygulama ihtiyaç duyduğu komutları hedefte değişiklik yapmadan önce doğrular.
 
 `zimigrate` çalışırken `export_data` klasörünü kopyalamayın. Klasörü güvenilir, tercihen
 disk şifrelemeli bir dosya sisteminde tutun. Arşiv hesap adları, secret export açıksa
@@ -320,14 +343,24 @@ için [SECURITY.md](SECURITY.md) dosyasına bakın.
   geri yüklemesi değildir.
 - Sertifikalar, özel anahtar dosyaları, `zmlocalconfig`, işletim sistemi paketleri, MTA
   kuyruğu, DNS, firewall ve ticari Network Edition backup verileri kurulmaz.
+  Hesap `jpegPhoto`, `userCertificate` ve `userSMIMECertificate` LDAP ikili
+  öznitelikleridir; `zmprov` argv ile DER/JPEG geri yazamaz, bu yüzden import atlar.
+- Varsayılan imza kimlikleri hedef imzalar oluşturulduktan sonra yeniden eşlenir.
+  `zimbraPrefMailSignatureContactId` bir kişi UUID'sidir ve hedefte boş bırakılır.
 - Cross-mailbox paylaşım kimlikleri değişebilir. Paylaşımlar ve delege edilmiş klasör
   yetkileri geçiş sonrasında kontrol edilmeli, gerekirse yeniden oluşturulmalıdır.
+- Hedef doğrulaması provisioning durumunu ve başarılı mailbox REST import checkpoint'lerini
+  karşılaştırır; hedef mailbox içeriğini öğe öğe karşılaştırmaz.
 - Kaynak sistem export sırasında değişmeye devam ederse cluster genelinde işlemsel bir
   snapshot oluşmaz. Son geçiş bakım veya yazma dondurma penceresinde yapılmalıdır.
 - Import disk hesabı yalnızca sıkıştırılmış ZIP/TGZ boyutunu değil, arşiv üyelerinin
   açılmış boyutunu kullanır. Çok mailbox sunuculu hedefte uzak düğüm yolları yerel dosya
-  sisteminden ölçülemez; cutover öncesinde eşlenen her hedef hosttaki boş alan ayrıca
-  doğrulanmalıdır.
+  sisteminden ölçülemez. Import, işletici her eşlenen hostu ayrıca denetleyip bu sınırı
+  açıkça kabul etmedikçe uzak mailhost eşlemelerini reddeder.
+- Yıl parçalı mailbox export, locale `mm/dd/yyyy` yerine Zimbra `DateQuery` sayısal UTC
+  epoch milisaniyelerini (`date:<` / `date:>=`) kullanır. REST sorgu export'u Zimbra
+  aramanın yaptığı gibi boş klasörleri ve aranabilir tarihi olmayan öğeleri atlayabilir;
+  en eksiksiz kopya için `mailbox_mode = "full"` kullanın.
 - Hedef sürüm kilidi isteğe bağlıdır. Varsayılan olarak `zmprov`/`zmmailbox`/`zmcontrol`
   çalıştırabilen her yerel Zimbra sürümü kabul edilir. Belirli bir `zmcontrol -v`
   çıktısını zorunlu kılmak için `import.expected_target_version_pattern` ayarlanır.

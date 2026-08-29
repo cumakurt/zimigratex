@@ -68,6 +68,28 @@ class SelectionCapacityTests(unittest.TestCase):
             self.assertGreater(export.estimated_unmeasured_mailbox_bytes, 0)
             self.assertGreaterEqual(export.estimated_unmeasured_mailbox_bytes, 64 * 1024**2)
 
+    def test_capacity_assessments_report_insufficient_status(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory)
+            disk = SimpleNamespace(total=10 * 1024**3, free=100 * 1024**2)
+            with patch("zimigrate.capacity.shutil.disk_usage", return_value=disk):
+                export = assess_export_disk(
+                    path,
+                    remaining_accounts=["u@example.com"],
+                    mailbox_usage={"u@example.com": 8 * 1024**3},
+                    include_mailboxes=True,
+                    workers=1,
+                )
+                self.assertEqual(export.status, "insufficient")
+                imported = assess_import_disks(
+                    path,
+                    volume_paths={"primaryMessage": [path], "index": [path]},
+                    remaining_mailbox_sizes=[8 * 1024**3],
+                    remaining_accounts=1,
+                    workers=1,
+                )
+                self.assertEqual(imported.status, "insufficient")
+
 
 if __name__ == "__main__":
     unittest.main()
