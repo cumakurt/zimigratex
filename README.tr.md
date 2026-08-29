@@ -239,6 +239,18 @@ Export ve import etkileşimli terminalde host, envanter, disk durumu ve aşama i
 aynı ekranda güncelleyen canlı bir panel gösterir. `--verbose`, `--json-logs`, TTY olmayan
 çıktı, `TERM=dumb` veya `ZIMIGRATE_PLAIN_OUTPUT=1` klasik satır tabanlı logları kullanır.
 
+Örnek dashboard ekranları (uygulamanın yerleşik Rich çizicisinden üretilmiştir):
+
+![Export dashboard](docs/screenshots/export-dashboard.svg)
+
+![Tamamlanmış import dashboard](docs/screenshots/import-completed.svg)
+
+Dashboard yerleşimi değişirse örnekleri yeniden üretmek için:
+
+```bash
+PYTHONPATH=src python scripts/generate-readme-screenshots.py
+```
+
 Varsayılan kullanım için yapılandırma dosyası gerekmez. Export kaynak makinedeki, import
 ise hedef makinedeki yerel Zimbra komutlarını çalıştırır. Uygulama hiçbir hedefe SSH
 komutu göndermez.

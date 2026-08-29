@@ -206,6 +206,18 @@ progress in place instead of printing a new `info:` line for every object.
 `--verbose`, `--json-logs`, a non-TTY, `TERM=dumb`, or `ZIMIGRATE_PLAIN_OUTPUT=1`
 restore the classic line-oriented logs. `status` and `preflight` still print JSON.
 
+Example dashboard screens (generated from the built-in Rich renderer):
+
+![Export dashboard](docs/screenshots/export-dashboard.svg)
+
+![Completed import dashboard](docs/screenshots/import-completed.svg)
+
+Regenerate these examples after changing the dashboard layout with:
+
+```bash
+PYTHONPATH=src python scripts/generate-readme-screenshots.py
+```
+
 No configuration file is needed for the default workflow. The source and destination
 commands always execute against the local Zimbra installation. Multi-mailbox source
 content may still be routed by Zimbra to an account's `zimbraMailHost` over its admin
