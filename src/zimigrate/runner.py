@@ -103,7 +103,7 @@ class CommandRunner:
                 stdout_target = subprocess.PIPE
             process = subprocess.Popen(  # nosec B603
                 command,
-                stdin=subprocess.PIPE if input_data is not None else None,
+                stdin=subprocess.PIPE if input_data is not None else subprocess.DEVNULL,
                 stdout=stdout_target,
                 stderr=subprocess.PIPE,
                 env=self.session.process_env() if self.session is not None else None,

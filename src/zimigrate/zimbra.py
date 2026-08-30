@@ -1,10 +1,7 @@
 from __future__ import annotations
 
 import base64
-import getpass
 import logging
-import os
-import pwd
 import re
 from binascii import Error as Base64Error
 from pathlib import Path
@@ -692,55 +689,22 @@ class ZimbraClient:
         output_path: Path,
     ) -> None:
         output_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-        command = [ZMMAILBOX, *options, "-t", "0", "getRestURL"]
-        if self._uses_mailbox_output_file():
-            # Newer zmmailbox writes status to stdout; -o keeps the archive off that stream.
-            self._grant_zimbra_write_access(output_path.parent)
-            command.extend(["-o", str(output_path), url])
-            extra: dict[str, Path] = {}
-        else:
-            # Remote SSH and Zimbra 8.6 stream the archive on stdout. Never use -o
-            # over SSH: that would create the file on the source host.
-            command.append(url)
-            extra = {"output_path": output_path}
+        # stdout is the only output path that works consistently for local sudo,
+        # older Zimbra releases, and SSH without staging data on the source host.
+        command = [ZMMAILBOX, *options, "-t", "0", "getRestURL", url]
         try:
             self.runner.run(
                 command,
                 timeout=self.endpoint.mailbox_timeout_seconds,
                 retryable=True,
-                **extra,
+                output_path=output_path,
             )
-            if extra and (not output_path.is_file() or output_path.stat().st_size == 0):
+            if not output_path.is_file() or output_path.stat().st_size == 0:
                 output_path.unlink(missing_ok=True)
                 raise CommandError("Mailbox export produced no data", retryable=True)
         except Exception:
             output_path.unlink(missing_ok=True)
             raise
-
-    def _uses_mailbox_output_file(self) -> bool:
-        if self.runner.is_remote:
-            return False
-        return self._mailbox_output_supported is not False
-
-    def _grant_zimbra_write_access(self, path: Path) -> None:
-        """zmmailbox runs as zimbra and must be able to create the -o file."""
-        user = self.endpoint.zimbra_user
-        if getpass.getuser() == user:
-            return
-        resolved = path.resolve()
-        if "mailboxes" not in resolved.parts:
-            return
-        try:
-            info = pwd.getpwnam(user)
-        except KeyError:
-            return
-        for candidate in (resolved, *resolved.parents):
-            try:
-                os.chown(candidate, info.pw_uid, info.pw_gid)
-            except OSError:
-                break
-            if candidate.name == "mailboxes":
-                break
 
     def _mailbox_options(self, account: str, mailbox_host: str | None) -> list[str]:
         options = ["-z"]

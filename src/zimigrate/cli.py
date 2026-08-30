@@ -133,8 +133,20 @@ def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     arguments = parser.parse_args(argv)
     remote_host = None
-    if arguments.command == "export" and not export_drain_enabled():
-        remote_host = resolve_remote_host(arguments.archive, getattr(arguments, "target_ip", None))
+    try:
+        if arguments.command in {"export", "import", "verify", "verify-target"}:
+            parse_target_scope(
+                getattr(arguments, "user", None),
+                getattr(arguments, "domain", None),
+            )
+        if arguments.command == "export" and not export_drain_enabled():
+            remote_host = resolve_remote_host(
+                arguments.archive,
+                getattr(arguments, "target_ip", None),
+            )
+    except (ZimigrateError, OSError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
     logging_session = configure_logging(
         verbose=arguments.verbose,
         json_logs=arguments.json_logs,
@@ -145,6 +157,7 @@ def main(argv: list[str] | None = None) -> int:
     previous_handler = signal.getsignal(signal.SIGINT)
     signal.signal(signal.SIGINT, handle_sigint)
     session = None
+    archive: MigrationArchive | None = None
     try:
         if arguments.command == "status":
             state_path = arguments.archive / "state.sqlite3"
@@ -288,6 +301,8 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 130
     finally:
+        if archive is not None:
+            archive.close_state()
         if session is not None:
             session.close()
         logging_session.close()
@@ -307,7 +322,6 @@ def _preflight(config: AppConfig, side: str) -> dict[str, str]:
             required_mailbox_commands=(
                 {"getRestURL"} if config.transfer.include_mailboxes else set()
             ),
-            require_mailbox_output=config.transfer.include_mailboxes,
         )
     if side in {"target", "both"}:
         target_version = ZimbraClient(

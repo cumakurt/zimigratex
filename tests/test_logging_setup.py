@@ -42,6 +42,16 @@ class DashboardSupportTests(unittest.TestCase):
                 _dashboard_supported(verbose=False, json_logs=False, operation="export")
             )
 
+    def test_tty_remote_export_enables_dashboard(self) -> None:
+        with _terminal_context():
+            self.assertTrue(
+                _dashboard_supported(
+                    verbose=False,
+                    json_logs=False,
+                    operation="remote-export",
+                )
+            )
+
     def test_stdout_tty_enables_dashboard_when_stderr_is_piped(self) -> None:
         with _terminal_context(stderr_tty=False, stdout_tty=True):
             self.assertTrue(

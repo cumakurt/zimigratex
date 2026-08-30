@@ -15,15 +15,20 @@ REMOTE_META_RELATIVE = "reports/remote-export.json"
 
 def remote_export_meta(archive_root: Path) -> dict[str, object] | None:
     path = archive_root / REMOTE_META_RELATIVE
-    try:
-        if not path.is_file():
-            return None
-        return read_json(path)
-    except (OSError, TypeError, ZimigrateError):
+    if not path.is_file():
         return None
+    value = read_json(path)
+    if value.get("schema_version") != SCHEMA_VERSION:
+        raise ConfigurationError("Remote export metadata schema is not supported")
+    host = value.get("target_ip")
+    if not isinstance(host, str) or not is_valid_ssh_target(host):
+        raise ConfigurationError("Remote export metadata contains an invalid target host")
+    return value
 
 
 def resolve_remote_host(archive_root: Path, target_ip: str | None) -> str | None:
+    if target_ip is not None and not is_valid_ssh_target(target_ip):
+        raise ConfigurationError(f"Invalid --target-ip value: {target_ip}")
     stored = remote_export_meta(archive_root)
     stored_host = stored.get("target_ip") if stored else None
     if isinstance(stored_host, str) and stored_host:
@@ -38,12 +43,14 @@ def resolve_remote_host(archive_root: Path, target_ip: str | None) -> str | None
 def stored_export_categories(archive_root: Path) -> set[str] | None:
     stored = remote_export_meta(archive_root)
     raw = stored.get("categories") if stored else None
-    if not isinstance(raw, list) or not raw:
+    if raw is None or raw == []:
         return None
+    if not isinstance(raw, list) or any(not isinstance(item, str) for item in raw):
+        raise ConfigurationError("Remote export metadata contains invalid categories")
     try:
-        return normalize_categories({str(item) for item in raw})
-    except ConfigurationError:
-        return None
+        return normalize_categories(set(raw))
+    except ConfigurationError as exc:
+        raise ConfigurationError("Remote export metadata contains invalid categories") from exc
 
 
 def bind_remote_export(

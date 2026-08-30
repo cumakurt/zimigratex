@@ -45,12 +45,19 @@ class TargetVerifier:
         self._existence_cache: dict[tuple[str, str], bool] = {}
         self._attribute_cache: dict[tuple[str, str], Attributes] = {}
         self._import_binding: dict[str, object] = {}
+        self._rejected_attributes: set[tuple[str, str]] = set()
 
     def run(self) -> dict[str, int]:
         manifest = self.archive.manifest()
         if not manifest.get("completed"):
             raise ZimigrateError("The export is incomplete; target verification cannot run")
         self._import_binding = _bound_import_options(self.archive)
+        if not _boolean_option(
+            self._import_binding,
+            "strict_attributes",
+            self.config.import_options.strict_attributes,
+        ):
+            self._rejected_attributes = _rejected_attribute_warnings(self.archive)
         selected = _imported_categories(self._import_binding)
         verification_transfer = replace(
             self.config.transfer,
@@ -355,7 +362,10 @@ class TargetVerifier:
         normalized_mapping = {
             source_id.casefold(): target_id for source_id, target_id in value_mapping.items()
         }
+        warning_entity = _warning_entity(record.name, field_prefix)
         for attribute, source_values in expected.items():
+            if (warning_entity, attribute) in self._rejected_attributes:
+                continue
             if not source_values or all(value == "" for value in source_values):
                 continue
             mapped_values = [_remap_reference(value, normalized_mapping) for value in source_values]
@@ -499,3 +509,42 @@ def _optional_string_option(
     if value is not None and not isinstance(value, str):
         raise ZimigrateError(f"Import configuration option is invalid: {name}")
     return value
+
+
+def _rejected_attribute_warnings(archive: MigrationArchive) -> set[tuple[str, str]]:
+    path = ensure_relative_path(archive.root, "reports/import-warnings.ndjson")
+    if not path.is_file():
+        return set()
+    rejected: set[tuple[str, str]] = set()
+    try:
+        with path.open(encoding="utf-8") as stream:
+            for line_number, line in enumerate(stream, start=1):
+                try:
+                    value = json.loads(line)
+                except json.JSONDecodeError as exc:
+                    raise ZimigrateError(
+                        f"Import warning report is invalid on line {line_number}"
+                    ) from exc
+                if not isinstance(value, dict):
+                    raise ZimigrateError(f"Import warning report is invalid on line {line_number}")
+                entity = value.get("entity")
+                attribute = value.get("attribute")
+                reason = value.get("reason")
+                if (
+                    isinstance(entity, str)
+                    and isinstance(attribute, str)
+                    and isinstance(reason, str)
+                    and reason.startswith("target rejected attribute:")
+                ):
+                    rejected.add((entity, attribute))
+    except OSError as exc:
+        raise ZimigrateError(f"Cannot read import warning report: {path}") from exc
+    return rejected
+
+
+def _warning_entity(record_name: str, field_prefix: str) -> str:
+    section, separator, name = field_prefix.partition(":")
+    if not separator:
+        return record_name
+    segment = "data-source" if section == "data_source" else section
+    return f"{record_name}/{segment}/{name}"

@@ -19,7 +19,12 @@ from zimigrate.errors import Interrupted, ZimigrateError
 from zimigrate.interrupt import WorkerPool, bounded_futures
 from zimigrate.models import Artifact, Attributes, EntityRecord
 from zimigrate.progress import PhaseProgress, entity_start_fields
-from zimigrate.scope import scope_from_transfer, selected_accounts, selected_names
+from zimigrate.scope import (
+    filter_domain_records,
+    scope_from_transfer,
+    selected_accounts,
+    selected_names,
+)
 from zimigrate.ssh import SshSession
 from zimigrate.util import atomic_json, ensure_relative_path, open_private_temporary
 from zimigrate.zimbra import ZimbraClient, required_export_commands
@@ -52,7 +57,6 @@ class Exporter:
             require_mailbox=transfer.include_mailboxes,
             required_provisioning_commands=required_export_commands(transfer),
             required_mailbox_commands={"getRestURL"} if transfer.include_mailboxes else set(),
-            require_mailbox_output=transfer.include_mailboxes and self._session is None,
         )
         source_host = self.client.hostname()
         export_options = self._export_options()
@@ -319,24 +323,19 @@ class Exporter:
         missing = sorted(scope.domains.difference(name.casefold() for name in selected))
         if missing:
             raise ZimigrateError(f"Domain not found: {missing[0]}")
-        if not scope.domains:
+        if not scope.active:
             return selected
         attributes_by_name = self._get_domains_parallel(names)
-        selected_ids: set[str] = set()
-        chosen = {name.casefold() for name in selected}
-        for name in selected:
-            if zimbra_id := first(attributes_by_name[name], "zimbraId"):
-                selected_ids.add(zimbra_id)
-        for name in names:
-            if name.casefold() in chosen:
-                continue
-            attributes = attributes_by_name[name]
-            domain_type = (first(attributes, "zimbraDomainType", "") or "").lower()
-            target = first(attributes, "zimbraDomainAliasTargetId")
-            if (domain_type == "alias" or target) and target in selected_ids:
-                selected.append(name)
-                chosen.add(name.casefold())
-        return selected
+        records = [
+            EntityRecord(
+                kind="domain",
+                name=name,
+                source_id=first(attributes_by_name[name], "zimbraId"),
+                attributes=attributes_by_name[name],
+            )
+            for name in names
+        ]
+        return [record.name for record in filter_domain_records(records, scope)]
 
     def _get_domains_parallel(self, names: list[str]) -> dict[str, Attributes]:
         if not names:
@@ -474,7 +473,6 @@ class Exporter:
                 "Exporting mailbox %s (%s)",
                 account,
                 label,
-                extra=entity_start_fields("account", f"{account} ({label})", action="export"),
             )
             self.archive.state.start(phase, entity)
             archive_format = self.config.transfer.mailbox_format

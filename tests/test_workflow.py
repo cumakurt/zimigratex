@@ -13,7 +13,7 @@ from zimigrate.config import (
     ImportConfig,
     TransferConfig,
 )
-from zimigrate.errors import ZimigrateError
+from zimigrate.errors import CommandError, ZimigrateError
 from zimigrate.exporter import Exporter
 from zimigrate.importer import Importer
 from zimigrate.models import EntityRecord
@@ -22,6 +22,57 @@ from zimigrate.target_verifier import TargetVerifier
 
 
 class WorkflowTests(unittest.TestCase):
+    def test_non_strict_attribute_rejections_remain_warnings_during_verification(self) -> None:
+        class UnsupportedAttributeSource(FakeSource):
+            def get_account(self, name: str) -> dict[str, list[str]]:
+                attributes = super().get_account(name)
+                attributes["zimbraUnsupportedOnTarget"] = ["source-value"]
+                return attributes
+
+        class UnsupportedAttributeTarget(FakeTarget):
+            def modify(
+                self,
+                kind: str,
+                name: str,
+                operations: list[str],
+                *,
+                sensitive: bool,
+            ) -> None:
+                if "zimbraUnsupportedOnTarget" in operations:
+                    raise CommandError(
+                        "target rejected attribute",
+                        attribute_rejection=True,
+                    )
+                super().modify(kind, name, operations, sensitive=sensitive)
+
+        with tempfile.TemporaryDirectory() as directory:
+            base = _config()
+            config = replace(
+                base,
+                import_options=replace(base.import_options, strict_attributes=False),
+            )
+            archive = MigrationArchive(Path(directory) / "archive", create=True)
+            exporter = Exporter(config, archive)
+            exporter.client = UnsupportedAttributeSource()
+            exporter.run()
+
+            target = UnsupportedAttributeTarget(Path(directory))
+            importer = Importer(config, archive)
+            importer.client = target
+            importer.run()
+
+            verifier = TargetVerifier(config, archive)
+            verifier.client = target
+            self.assertEqual(verifier.run()["mismatches"], 0)
+            warning_report = archive.root / "reports" / "import-warnings.ndjson"
+            self.assertIn("zimbraUnsupportedOnTarget", warning_report.read_text(encoding="utf-8"))
+
+            target.objects[("account", "user@example.com")]["displayName"] = ["Changed"]
+            drift_verifier = TargetVerifier(config, archive)
+            drift_verifier.client = target
+            with self.assertRaises(ZimigrateError):
+                drift_verifier.run()
+
     def test_remote_mailhost_capacity_requires_explicit_operator_acceptance(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             base = _config()

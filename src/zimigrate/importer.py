@@ -647,9 +647,6 @@ class Importer:
                     "Importing mailbox %s (%s)",
                     record.name,
                     artifact.label,
-                    extra=entity_start_fields(
-                        "account", f"{record.name} ({artifact.label})", action="import"
-                    ),
                 )
                 resolution = (
                     "skip"

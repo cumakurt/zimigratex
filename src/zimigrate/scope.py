@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+from collections import deque
 from collections.abc import Iterable
 from dataclasses import dataclass, replace
 from fnmatch import fnmatchcase
@@ -155,18 +156,30 @@ def filter_distribution_records(
 def filter_domain_records(records: list[EntityRecord], scope: TargetScope) -> list[EntityRecord]:
     if not scope.active:
         return records
-    primary = [record for record in records if scope.matches_domain(record.name)]
-    primary_ids = {record.source_id for record in primary if record.source_id}
-    selected = list(primary)
-    seen = {record.name.casefold() for record in selected}
+    records_by_id = {record.source_id: record for record in records if record.source_id}
+    aliases_by_target: dict[str, list[EntityRecord]] = {}
     for record in records:
-        if record.name.casefold() in seen:
-            continue
         target_id = _alias_target_id(record)
-        if target_id and target_id in primary_ids:
-            selected.append(record)
-            seen.add(record.name.casefold())
-    return selected
+        if target_id is not None:
+            aliases_by_target.setdefault(target_id, []).append(record)
+
+    selected: set[str] = set()
+    pending = deque(record for record in records if scope.matches_domain(record.name))
+    while pending:
+        record = pending.popleft()
+        name = record.name.casefold()
+        if name in selected:
+            continue
+        selected.add(name)
+
+        if record.source_id:
+            pending.extend(aliases_by_target.get(record.source_id, ()))
+        target_id = _alias_target_id(record)
+        target = records_by_id.get(target_id) if target_id is not None else None
+        if target is not None:
+            pending.append(target)
+
+    return [record for record in records if record.name.casefold() in selected]
 
 
 def filter_cos_records(

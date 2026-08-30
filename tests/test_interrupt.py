@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import getpass
+import subprocess
 import sys
 import unittest
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from zimigrate.config import EndpointConfig
 from zimigrate.errors import CommandError, Interrupted
@@ -43,3 +44,20 @@ class InterruptRunnerTests(unittest.TestCase):
         )
 
         self.assertEqual(result.stdout, "batch-secret\n")
+
+    def test_commands_without_input_cannot_consume_operator_stdin(self) -> None:
+        runner = CommandRunner(
+            EndpointConfig(zimbra_user=getpass.getuser()),
+            retries=0,
+            retry_base_seconds=0,
+        )
+        process = MagicMock()
+        process.returncode = 0
+
+        with (
+            patch("zimigrate.runner.subprocess.Popen", return_value=process) as popen,
+            patch("zimigrate.runner._communicate_until", return_value=(b"", b"")),
+        ):
+            runner.run([sys.executable, "-c", "pass"])
+
+        self.assertIs(popen.call_args.kwargs["stdin"], subprocess.DEVNULL)

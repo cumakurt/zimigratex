@@ -112,7 +112,7 @@ class SshSession:
     ) -> None:
         local_file.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         self._rsync_copy(
-            f"{self._destination()}:{_absolute_remote(remote_file)}",
+            f"{self._rsync_destination()}:{_absolute_remote(remote_file)}",
             str(local_file.resolve()),
             delete=False,
         )
@@ -127,7 +127,7 @@ class SshSession:
     ) -> None:
         self._rsync_copy(
             f"{local.resolve()}/",
-            f"{self._destination()}:{_absolute_remote(remote_path)}",
+            f"{self._rsync_destination()}:{_absolute_remote(remote_path)}",
             delete=delete,
             excludes=excludes,
         )
@@ -142,7 +142,7 @@ class SshSession:
     ) -> None:
         local.mkdir(mode=0o700, parents=True, exist_ok=True)
         self._rsync_copy(
-            f"{self._destination()}:{_absolute_remote(remote_path)}/",
+            f"{self._rsync_destination()}:{_absolute_remote(remote_path)}/",
             f"{local.resolve()}/",
             delete=delete,
             excludes=excludes,
@@ -153,23 +153,20 @@ class SshSession:
             raise ZimigrateError("Remote name pattern is invalid")
         interrupt = get_interrupt()
         interrupt.check()
-        command = [
-            self._ssh,
-            *self._ssh_options(master="no"),
-            "-T",
-            self._destination(),
-            "--",
-            "find",
-            _absolute_remote(remote_dir),
-            "-maxdepth",
-            "1",
-            "-type",
-            "f",
-            "-name",
-            name_pattern,
-            "-print",
-            "-quit",
-        ]
+        command = self.remote_argv(
+            [
+                "find",
+                _absolute_remote(remote_dir),
+                "-maxdepth",
+                "1",
+                "-type",
+                "f",
+                "-name",
+                name_pattern,
+                "-print",
+                "-quit",
+            ]
+        )
         try:
             completed = subprocess.run(  # nosec B603
                 command,
@@ -210,13 +207,14 @@ class SshSession:
         if not remote_command:
             raise ZimigrateError("Remote command is empty")
         use_tty = tty and sys.stdin.isatty()
+        # OpenSSH treats every argument after the destination as part of the
+        # remote command. A ``--`` here would be sent to the remote shell.
         return [
             self._ssh,
             *self._ssh_options(master="no"),
             "-t" if use_tty else "-T",
             self._destination(),
-            "--",
-            *remote_command,
+            " ".join(_shell_quote(part) for part in remote_command),
         ]
 
     def process_env(self) -> dict[str, str]:
@@ -305,6 +303,9 @@ class SshSession:
         return options
 
     def _destination(self) -> str:
+        return f"{self.user}@{self.host}"
+
+    def _rsync_destination(self) -> str:
         host = f"[{self.host}]" if ":" in self.host else self.host
         return f"{self.user}@{host}"
 

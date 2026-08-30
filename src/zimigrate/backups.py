@@ -45,12 +45,21 @@ class BackupSummary:
 def discover_backups(root: Path) -> list[BackupSummary]:
     summaries: list[BackupSummary] = []
     seen: set[Path] = set()
-    if not root.is_dir():
+    try:
+        children = sorted(root.iterdir(), key=lambda path: path.name.casefold())
+    except OSError:
         return []
-    for child in sorted(root.iterdir(), key=lambda path: path.name.casefold()):
-        if not child.is_dir() or child.name in SKIP_DIRECTORY_NAMES:
+    for child in children:
+        if child.name in SKIP_DIRECTORY_NAMES:
             continue
-        summary = summarize_backup(child)
+        try:
+            if not child.is_dir():
+                continue
+            summary = summarize_backup(child)
+        except OSError:
+            # An unrelated root-owned or disconnected mount must not make the
+            # interactive archive picker unusable.
+            continue
         if summary is None:
             continue
         resolved = summary.path.resolve()

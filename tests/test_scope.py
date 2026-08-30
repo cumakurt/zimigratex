@@ -48,6 +48,24 @@ class TargetScopeTests(unittest.TestCase):
         )
         self.assertEqual([record.name for record in domains], ["deneme.com", "alias.example.com"])
 
+    def test_alias_domain_scope_also_keeps_its_primary_domain(self) -> None:
+        records = [
+            EntityRecord(kind="domain", name="primary.example", source_id="id-1", attributes={}),
+            EntityRecord(
+                kind="domain",
+                name="alias.example",
+                source_id="id-2",
+                attributes={
+                    "zimbraDomainType": ["alias"],
+                    "zimbraDomainAliasTargetId": ["id-1"],
+                },
+            ),
+        ]
+
+        selected = filter_domain_records(records, parse_target_scope([], ["alias.example"]))
+
+        self.assertEqual([record.name for record in selected], ["primary.example", "alias.example"])
+
     def test_comma_separated_values_and_invalid_input_are_rejected(self) -> None:
         scope = parse_target_scope(["a@example.com,b@example.com"], ["@Example.com"])
         self.assertEqual(scope.users, frozenset({"a@example.com", "b@example.com"}))

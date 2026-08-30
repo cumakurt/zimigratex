@@ -4,8 +4,7 @@ import base64
 import tempfile
 import unittest
 from pathlib import Path
-from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 from zimigrate.config import AppConfig, EndpointConfig, ImportConfig, TransferConfig
 from zimigrate.errors import CommandError, CompatibilityError, ZimigrateError
@@ -215,14 +214,22 @@ class ZimbraCommandTests(unittest.TestCase):
         )
 
     def test_mailbox_export_routes_to_mailhost_with_zip_metadata_and_lock(self) -> None:
-        self.client.export_mailbox(
-            "user@example.com",
-            "is:anywhere",
-            Path("/tmp/mailbox.zip"),
-            "mailbox-1.example.com",
-            "zip",
-            True,
-        )
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "mailbox.zip"
+
+            def write_archive(*_args: object, **kwargs: object) -> CommandResult:
+                kwargs["output_path"].write_bytes(b"archive")
+                return CommandResult("", "", 0)
+
+            self.client.runner.run.side_effect = write_archive
+            self.client.export_mailbox(
+                "user@example.com",
+                "is:anywhere",
+                output,
+                "mailbox-1.example.com",
+                "zip",
+                True,
+            )
 
         command = self.client.runner.run.call_args.args[0]
         self.assertEqual(
@@ -237,14 +244,12 @@ class ZimbraCommandTests(unittest.TestCase):
                 "-t",
                 "0",
                 "getRestURL",
-                "-o",
-                "/tmp/mailbox.zip",
                 "//?fmt=zip&meta=1&lock=1&emptyname=mailbox.zip&query=is:anywhere",
             ],
         )
         self.client.runner.run.assert_called_once()
         self.assertTrue(self.client.runner.run.call_args.kwargs.get("retryable"))
-        self.assertIsNone(self.client.runner.run.call_args.kwargs.get("output_path"))
+        self.assertEqual(self.client.runner.run.call_args.kwargs.get("output_path"), output)
 
     def test_remote_mailbox_export_streams_stdout_without_output_file(self) -> None:
         session = MagicMock()
@@ -291,24 +296,19 @@ class ZimbraCommandTests(unittest.TestCase):
                 self.client.export_mailbox("user@example.com", "is:anywhere", output)
             self.assertFalse(output.is_file())
 
-    def test_mailbox_export_chowns_mailbox_dirs_when_not_zimbra(self) -> None:
+    def test_local_mailbox_export_does_not_require_zimbra_to_write_archive_path(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             output = Path(directory) / "mailboxes" / "user@example.com" / "full.tgz"
-            owner = SimpleNamespace(pw_uid=107, pw_gid=107)
-            with (
-                patch("zimigrate.zimbra.getpass.getuser", return_value="root"),
-                patch("zimigrate.zimbra.pwd.getpwnam", return_value=owner),
-                patch("zimigrate.zimbra.os.chown") as chown,
-            ):
-                self.client.export_mailbox(
-                    "user@example.com",
-                    "is:anywhere",
-                    output,
-                )
-            chowned = {Path(call.args[0]) for call in chown.call_args_list}
-            self.assertIn(output.parent.resolve(), chowned)
-            self.assertIn((output.parent.parent).resolve(), chowned)
-            self.assertTrue(all(call.args[1:] == (107, 107) for call in chown.call_args_list))
+
+            def write_archive(*_args: object, **kwargs: object) -> CommandResult:
+                kwargs["output_path"].write_bytes(b"archive")
+                return CommandResult("", "", 0)
+
+            self.client.runner.run.side_effect = write_archive
+            self.client.export_mailbox("user@example.com", "is:anywhere", output)
+
+            self.assertNotIn("-o", self.client.runner.run.call_args.args[0])
+            self.assertEqual(self.client.runner.run.call_args.kwargs["output_path"], output)
 
     def test_mailbox_export_does_not_silently_drop_requested_lock(self) -> None:
         self.client.runner.run.side_effect = CommandError("unknown parameter lock")

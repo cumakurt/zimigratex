@@ -52,6 +52,20 @@ class BackupDiscoveryTests(unittest.TestCase):
                 chosen = prompt_backup_choice([first, second], default=first.path)
             self.assertEqual(chosen, second.path)
 
+    def test_discovery_ignores_inaccessible_unrelated_directories(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            valid = _write_archive(root / "valid", host="mail.example.com")
+            blocked = root / "blocked"
+            blocked.mkdir()
+            blocked.chmod(0)
+            try:
+                backups = discover_backups(root)
+            finally:
+                blocked.chmod(0o700)
+
+            self.assertEqual([backup.path for backup in backups], [valid.resolve()])
+
     def test_import_scope_and_domain_prompts(self) -> None:
         with patch("builtins.input", return_value=""):
             self.assertEqual(prompt_import_scope(has_domains=True), "full")

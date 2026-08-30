@@ -22,7 +22,7 @@ from rich.table import Table
 from rich.text import Text
 
 STANDARD_FIELDS = set(logging.makeLogRecord({}).__dict__) | {"message", "asctime"}
-VISUAL_OPERATIONS = {"export", "import", "verify", "verify-target"}
+VISUAL_OPERATIONS = {"export", "remote-export", "import", "verify", "verify-target"}
 PLAIN_OUTPUT_ENV = "ZIMIGRATE_PLAIN_OUTPUT"
 RECENT_EVENT_LIMIT = 6
 PHASE_EVENTS = {"phase_start", "phase_empty", "phase_progress", "entity_start"}
@@ -30,6 +30,7 @@ QUIET_EVENTS = {"entity_start", "phase_progress"}
 VERSION_PATTERN = re.compile(r"\d+\.\d+\.\d+")
 ACTION_VERBS = {
     "export": "Exporting",
+    "remote-export": "Exporting",
     "import": "Importing",
     "verify": "Verifying",
 }
@@ -418,11 +419,12 @@ def _configure_stream(stream: TextIO) -> None:
 
 
 def _dashboard_panel(snapshot: DashboardSnapshot, width: int) -> Panel:
-    content: list[Any] = [_status_table(snapshot), _facts_table(snapshot)]
+    compact = width < 90
+    content: list[Any] = [_status_table(snapshot), _facts_table(snapshot, compact=compact)]
     if snapshot.capacity:
-        content.append(_capacity_table(snapshot.capacity))
+        content.append(_capacity_table(snapshot.capacity, compact=compact))
     if snapshot.phases:
-        content.append(_phase_table(snapshot.phases, compact=width < 90))
+        content.append(_phase_table(snapshot.phases, compact=compact))
     content.append(_recent_table(snapshot.recent))
     content.append(
         Text(
@@ -433,7 +435,7 @@ def _dashboard_panel(snapshot: DashboardSnapshot, width: int) -> Panel:
     )
     title = Text.assemble(
         (" zimigrate ", "bold white on blue"),
-        (f" {snapshot.operation.upper()} ", "bold cyan"),
+        (f" {snapshot.operation.replace('-', ' ').upper()} ", "bold cyan"),
     )
     return Panel(
         Group(*content),
@@ -470,22 +472,23 @@ def _status_table(snapshot: DashboardSnapshot) -> Table:
     return table
 
 
-def _facts_table(snapshot: DashboardSnapshot) -> Table:
+def _facts_table(snapshot: DashboardSnapshot, *, compact: bool) -> Table:
     table = Table.grid(expand=True, padding=(0, 2))
     if not snapshot.facts:
         table.add_row(Text("System discovery in progress", style="dim"))
         return table
-    for _ in range(min(3, len(snapshot.facts))):
+    column_count = min(2 if compact else 3, len(snapshot.facts))
+    for _ in range(column_count):
         table.add_column(ratio=1)
     cells = [
         Text.assemble((label + ": ", "dim"), (value, "bold")) for label, value in snapshot.facts
     ]
-    for offset in range(0, len(cells), 3):
-        table.add_row(*cells[offset : offset + 3])
+    for offset in range(0, len(cells), column_count):
+        table.add_row(*cells[offset : offset + column_count])
     return table
 
 
-def _capacity_table(capacity: tuple[tuple[str, str], ...]) -> Panel:
+def _capacity_table(capacity: tuple[tuple[str, str], ...], *, compact: bool) -> Panel:
     status = dict(capacity).get("Disk", "").casefold()
     value_style = {
         "sufficient": "bold green",
@@ -498,11 +501,14 @@ def _capacity_table(capacity: tuple[tuple[str, str], ...]) -> Panel:
         "insufficient": "red",
     }.get(status, "cyan")
     table = Table.grid(expand=True, padding=(0, 2))
-    for _ in capacity:
+    column_count = 2 if compact else 3
+    for _ in range(min(column_count, len(capacity))):
         table.add_column(ratio=1)
-    table.add_row(
-        *[Text.assemble((label + " ", "dim"), (value, value_style)) for label, value in capacity]
-    )
+    cells = [
+        Text.assemble((label + ": ", "dim"), (value, value_style)) for label, value in capacity
+    ]
+    for offset in range(0, len(cells), column_count):
+        table.add_row(*cells[offset : offset + column_count])
     return Panel(table, title="Capacity", border_style=border_style, box=box.SIMPLE)
 
 

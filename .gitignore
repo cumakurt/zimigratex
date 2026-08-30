@@ -9,7 +9,7 @@ __pycache__/
 .runtime/
 dist/
 build/
+/export_data/
 *.sqlite3
 *.tgz
 *.zmenc
-

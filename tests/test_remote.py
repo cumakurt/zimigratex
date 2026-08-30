@@ -112,6 +112,26 @@ class RemoteExportTests(unittest.TestCase):
         self.assertIn("ServerAliveInterval=30", options)
         self.assertIn("ServerAliveCountMax=20", options)
 
+    def test_remote_command_is_shell_quoted_as_one_argument(self) -> None:
+        session = SshSession("192.0.2.10", user="root")
+        session._control_path = Path("/tmp/zimigrate-ssh-test/mux")
+
+        command = session.remote_argv(
+            ["env", "LC_ALL=C", "zmmailbox", "//?fmt=zip&query=name:'a b';false"]
+        )
+
+        self.assertNotIn("--", command)
+        self.assertEqual(
+            command[-1],
+            "'env' 'LC_ALL=C' 'zmmailbox' '//?fmt=zip&query=name:'\\''a b'\\'';false'",
+        )
+
+    def test_ipv6_uses_native_ssh_and_bracketed_rsync_destinations(self) -> None:
+        session = SshSession("2001:db8::10", user="zimbra")
+
+        self.assertEqual(session._destination(), "zimbra@2001:db8::10")
+        self.assertEqual(session._rsync_destination(), "zimbra@[2001:db8::10]")
+
     def test_strict_host_key_checking_falls_back_on_old_openssh(self) -> None:
         completed = MagicMock()
         completed.stderr = b'command-line line 0: unsupported option "accept-new".\n'
@@ -119,6 +139,16 @@ class RemoteExportTests(unittest.TestCase):
             strict_host_key_checking.cache_clear()
             self.assertEqual(strict_host_key_checking("/usr/bin/ssh"), "yes")
             strict_host_key_checking.cache_clear()
+
+    def test_corrupt_remote_metadata_is_not_treated_as_a_local_archive(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            reports = root / "reports"
+            reports.mkdir()
+            (reports / "remote-export.json").write_text("{}\n", encoding="utf-8")
+
+            with self.assertRaisesRegex(ConfigurationError, "metadata"):
+                resolve_remote_host(root, None)
 
 
 if __name__ == "__main__":

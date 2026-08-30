@@ -48,6 +48,8 @@ class CliTests(unittest.TestCase):
 
         with (
             patch("zimigrate.cli.configure_logging"),
+            patch("zimigrate.cli.resolve_remote_host", return_value=None),
+            patch("zimigrate.cli.stored_export_categories", return_value=None),
             patch("zimigrate.cli.load_config", return_value=config) as load_config,
             patch("zimigrate.cli.MigrationArchive", return_value=archive) as migration_archive,
             patch("zimigrate.cli.Exporter", return_value=exporter),
@@ -80,6 +82,8 @@ class CliTests(unittest.TestCase):
 
         with (
             patch("zimigrate.cli.configure_logging"),
+            patch("zimigrate.cli.resolve_remote_host", return_value=None),
+            patch("zimigrate.cli.stored_export_categories", return_value=None),
             patch("zimigrate.cli.load_config", return_value=config),
             patch("zimigrate.cli.MigrationArchive", return_value=archive),
             patch("zimigrate.cli.Exporter", side_effect=capture_exporter),
@@ -173,6 +177,8 @@ class CliTests(unittest.TestCase):
 
         with (
             patch("zimigrate.cli.configure_logging"),
+            patch("zimigrate.cli.resolve_remote_host", return_value="192.0.2.10"),
+            patch("zimigrate.cli.stored_export_categories", return_value=None),
             patch("zimigrate.cli.load_config", return_value=config),
             patch("zimigrate.cli.MigrationArchive", return_value=archive),
             patch("zimigrate.cli.connect_ssh", return_value=session) as connect,
