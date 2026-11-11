@@ -22,6 +22,7 @@ from zimigrate.util import is_valid_dns_name
 
 LOGGER = logging.getLogger(__name__)
 ZMPROV = "/opt/zimbra/bin/zmprov"
+STDIN_RELAY = ["/bin/sh", "-c", 'cat | "$@"', "zimigrate-stdin"]
 ZMMAILBOX = "/opt/zimbra/bin/zmmailbox"
 ZMCONTROL = "/opt/zimbra/bin/zmcontrol"
 ZMHOSTNAME = "/opt/zimbra/bin/zmhostname"
@@ -764,9 +765,10 @@ class ZimbraClient:
             command_line.extend(["-s", soap_server])
         input_data = None
         if protect_arguments:
-            # Read the inherited stdin directly: reopening /dev/stdin can fail
-            # after sudo changes users because the pipe belongs to its creator.
-            # Explicit exit makes interactive zmprov return prior command errors.
+            # Create a new pipe after sudo switches users, so zmprov can reopen
+            # it. File mode also bypasses JLine's lossy interactive input bridge.
+            # The fixed shell program forwards argv; values stay on stdin.
+            command_line = [*STDIN_RELAY, *command_line, "-f", "/dev/stdin"]
             input_data = (_batch_line([command, *arguments]) + "\nexit\n").encode("utf-8")
         else:
             command_line.extend([command, *arguments])

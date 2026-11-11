@@ -575,10 +575,10 @@ atomic writes, `0600` files, a `0700` directory, and a required SQLite checkpoin
 database. Records and mailbox payloads are stored in plaintext. Worker submission is
 bounded. Only classified transient failures use limited exponential retries.
 Temporary mailbox chunks live under `export_data/.tmp` and are removed afterward.
-Sensitive `zmprov` values are sent through inherited standard input, keeping them
-out of process arguments. This avoids reopening `/dev/stdin` after switching to
-the `zimbra` user with sudo. An explicit `exit` command preserves Zimbra's failure
-exit status.
+Sensitive `zmprov` values are sent through a pipe created as the `zimbra` user,
+keeping them out of process arguments. File input bypasses interactive line editing
+to preserve UTF-8, and the pipe ownership permits opening `/dev/stdin` after sudo.
+An explicit `exit` command preserves Zimbra's failure exit status.
 
 The mailbox protocol follows Zimbra's
 [REST export/import reference](https://github.com/Zimbra/zm-mailbox/blob/develop/store/docs/rest.txt).

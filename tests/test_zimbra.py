@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -12,6 +13,7 @@ from zimigrate.errors import CommandError, CompatibilityError, ZimigrateError
 from zimigrate.exporter import Exporter
 from zimigrate.models import CommandResult
 from zimigrate.zimbra import (
+    STDIN_RELAY,
     ZMMAILBOX,
     ZMPROV,
     ZimbraClient,
@@ -207,7 +209,7 @@ class ZimbraCommandTests(unittest.TestCase):
         command = self.client.runner.run.call_args.args[0]
         self.assertEqual(
             command,
-            [ZMPROV, "-l"],
+            [*STDIN_RELAY, ZMPROV, "-l", "-f", "/dev/stdin"],
         )
         self.assertEqual(
             self.client.runner.run.call_args.kwargs["input_data"],
@@ -469,12 +471,28 @@ class ZimbraCommandTests(unittest.TestCase):
             ["zimbraAccountStatus", "maintenance"],
         )
         command = self.client.runner.run.call_args.args[0]
-        self.assertEqual(command, [ZMPROV, "-l"])
+        self.assertEqual(command, [*STDIN_RELAY, ZMPROV, "-l", "-f", "/dev/stdin"])
         self.assertEqual(
             self.client.runner.run.call_args.kwargs["input_data"],
             b"'ca' 'user@example.com' '' 'zimbraAccountStatus' 'maintenance'\nexit\n",
         )
         self.assertTrue(self.client.runner.run.call_args.kwargs.get("retryable"))
+
+    def test_stdin_relay_preserves_turkish_bytes_in_file_mode(self) -> None:
+        payload = "ÇçĞğİıÖöŞşÜü Türkçe açıklama\n".encode()
+        result = subprocess.run(
+            [
+                *STDIN_RELAY,
+                sys.executable,
+                "-c",
+                'import sys; sys.stdout.buffer.write(open("/dev/stdin", "rb").read())',
+            ],
+            input=payload,
+            capture_output=True,
+            timeout=10,
+            check=True,
+        )
+        self.assertEqual(result.stdout, payload)
 
     def test_stdin_command_returns_interactive_zimbra_failure(self) -> None:
         client = ZimbraClient(EndpointConfig(), retries=0, retry_base_seconds=0)
@@ -582,8 +600,8 @@ class ZimbraCommandTests(unittest.TestCase):
         )
         calls = self.client.runner.run.call_args_list
         self.assertEqual(len(calls), 2)
-        self.assertEqual(calls[0].args[0], [ZMPROV, "-l"])
-        self.assertEqual(calls[1].args[0], [ZMPROV])
+        self.assertEqual(calls[0].args[0], [*STDIN_RELAY, ZMPROV, "-l", "-f", "/dev/stdin"])
+        self.assertEqual(calls[1].args[0], [*STDIN_RELAY, ZMPROV, "-f", "/dev/stdin"])
         self.assertIn(b"zimbraPrefDefaultCalendarId", calls[1].kwargs["input_data"])
         self.assertNotIn(b"userPassword", calls[1].kwargs["input_data"])
 
@@ -595,7 +613,7 @@ class ZimbraCommandTests(unittest.TestCase):
             sensitive=True,
         )
         command = self.client.runner.run.call_args.args[0]
-        self.assertEqual(command, [ZMPROV, "-l"])
+        self.assertEqual(command, [*STDIN_RELAY, ZMPROV, "-l", "-f", "/dev/stdin"])
         self.assertEqual(
             self.client.runner.run.call_args.kwargs["input_data"],
             b"'ma' 'user@example.com' 'userPassword' '{SSHA}hash'\nexit\n",
@@ -619,7 +637,7 @@ class ZimbraCommandTests(unittest.TestCase):
         )
 
         command = self.client.runner.run.call_args.args[0]
-        self.assertEqual(command, [ZMPROV, "-l"])
+        self.assertEqual(command, [*STDIN_RELAY, ZMPROV, "-l", "-f", "/dev/stdin"])
         self.assertNotIn(b"line 1", " ".join(command).encode())
         self.assertEqual(
             self.client.runner.run.call_args.kwargs["input_data"],
