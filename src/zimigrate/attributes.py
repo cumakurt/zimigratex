@@ -128,9 +128,10 @@ def attribute_operations(attributes: Attributes) -> list[tuple[str, list[str]]]:
 def flatten_operations(attributes: list[tuple[str, list[str]]]) -> list[str]:
     result: list[str] = []
     for name, values in attributes:
-        result.extend([name, values[0]])
-        for value in values[1:]:
-            result.extend([f"+{name}", value])
+        # Repeated unprefixed keys form one replacement value list in zmprov.
+        # Mixing a replacement key with +key in one command is rejected.
+        for value in values:
+            result.extend([name, value])
     return result
 
 

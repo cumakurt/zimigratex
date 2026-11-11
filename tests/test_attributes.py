@@ -66,13 +66,13 @@ class AttributeTests(unittest.TestCase):
 
         self.assertEqual(result, {"displayName": ["Example User"]})
 
-    def test_flatten_operations_replaces_then_adds_multivalues(self) -> None:
+    def test_flatten_operations_replaces_multivalues_without_mixing_modifiers(self) -> None:
         self.assertEqual(
             flatten_operations([("zimbraMailForwardingAddress", ["a@x", "b@x"])]),
             [
                 "zimbraMailForwardingAddress",
                 "a@x",
-                "+zimbraMailForwardingAddress",
+                "zimbraMailForwardingAddress",
                 "b@x",
             ],
         )
