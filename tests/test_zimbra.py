@@ -4,7 +4,7 @@ import base64
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 from zimigrate.config import AppConfig, EndpointConfig, ImportConfig, TransferConfig
 from zimigrate.errors import CommandError, CompatibilityError, ZimigrateError
@@ -15,6 +15,7 @@ from zimigrate.zimbra import (
     ZMPROV,
     ZimbraClient,
     is_already_exists_error,
+    is_missing_object_error,
     mailbox_rest_url,
     parse_attribute_sections,
     parse_attributes,
@@ -479,6 +480,50 @@ class ZimbraCommandTests(unittest.TestCase):
             "ERROR: account.NO_SUCH_ACCOUNT (no such account)"
         )
         self.assertIsNone(self.client.get_optional("account", "missing@example.com"))
+
+    def test_sensitive_missing_lookup_reaches_client_as_missing_object(self) -> None:
+        client = ZimbraClient(EndpointConfig(), retries=0, retry_base_seconds=0)
+        process = MagicMock(returncode=2)
+        for kind, code in (
+            ("account", "NO_SUCH_ACCOUNT"),
+            ("domain", "NO_SUCH_DOMAIN"),
+            ("cos", "NO_SUCH_COS"),
+            ("calendar_resource", "NO_SUCH_CALENDAR_RESOURCE"),
+            ("distribution_list", "NO_SUCH_DISTRIBUTION_LIST"),
+        ):
+            with (
+                self.subTest(kind=kind),
+                patch("zimigrate.runner.subprocess.Popen", return_value=process),
+                patch(
+                    "zimigrate.runner._communicate_until",
+                    return_value=(b"", f"ERROR: account.{code} (secret-value)".encode()),
+                ),
+            ):
+                self.assertIsNone(client.get_optional(kind, "missing@example.com"))
+
+    def test_sensitive_errors_preserve_known_codes_without_diagnostic_values(self) -> None:
+        client = ZimbraClient(EndpointConfig(), retries=0, retry_base_seconds=0)
+        process = MagicMock(returncode=2)
+        for code, missing, exists in (
+            ("NO_SUCH_ACCOUNT", True, False),
+            ("ACCOUNT_EXISTS", False, True),
+            ("ALIAS_EXISTS", False, True),
+            ("UNKNOWN_ERROR", False, False),
+        ):
+            with (
+                self.subTest(code=code),
+                patch("zimigrate.runner.subprocess.Popen", return_value=process),
+                patch(
+                    "zimigrate.runner._communicate_until",
+                    return_value=(b"", f"ERROR: account.{code} (secret-value)".encode()),
+                ),
+                self.assertRaises(CommandError) as caught,
+            ):
+                client.runner.run([ZMPROV, "ga", "user@example.com"], sensitive=True)
+            self.assertNotIn("secret-value", str(caught.exception))
+            self.assertIn("output redacted", str(caught.exception))
+            self.assertEqual(is_missing_object_error(caught.exception), missing)
+            self.assertEqual(is_already_exists_error(caught.exception), exists)
 
     def test_get_optional_does_not_treat_network_lookup_failure_as_a_missing_object(self) -> None:
         self.client.runner.run.side_effect = CommandError("mail server host not found")

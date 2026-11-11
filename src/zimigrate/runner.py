@@ -10,7 +10,12 @@ import time
 from pathlib import Path
 
 from zimigrate.config import EndpointConfig
-from zimigrate.errors import CommandError, Interrupted
+from zimigrate.errors import (
+    ALREADY_EXISTS_MARKERS,
+    MISSING_OBJECT_MARKERS,
+    CommandError,
+    Interrupted,
+)
 from zimigrate.interrupt import InterruptController, get_interrupt, stop_process
 from zimigrate.models import CommandResult
 from zimigrate.ssh import SshSession
@@ -158,11 +163,23 @@ class CommandRunner:
                 raise Interrupted("Interrupted by user")
             detail = "output redacted" if sensitive else _safe_error(stderr or stdout)
             failure = _classify_failure(stderr or stdout)
+            # Preserve only known error codes so callers can recognize missing or
+            # existing objects without retaining sensitive diagnostic values.
+            diagnostic = (stderr or stdout).casefold()
+            zimbra_code = next(
+                (
+                    marker
+                    for marker in (*MISSING_OBJECT_MARKERS, *ALREADY_EXISTS_MARKERS)
+                    if marker in diagnostic
+                ),
+                None,
+            )
             raise CommandError(
                 f"Zimbra command failed with exit code {process.returncode}: {detail}",
                 returncode=process.returncode,
                 retryable=failure == "transient",
                 attribute_rejection=failure == "attribute",
+                zimbra_code=zimbra_code,
             )
         return CommandResult(stdout=stdout, stderr=stderr, returncode=process.returncode)
 

@@ -8,7 +8,13 @@ from pathlib import Path
 from urllib.parse import quote
 
 from zimigrate.config import EndpointConfig, TransferConfig
-from zimigrate.errors import CommandError, CompatibilityError, ZimigrateError
+from zimigrate.errors import (
+    ALREADY_EXISTS_MARKERS,
+    MISSING_OBJECT_MARKERS,
+    CommandError,
+    CompatibilityError,
+    ZimigrateError,
+)
 from zimigrate.models import Attributes
 from zimigrate.runner import CommandRunner
 from zimigrate.ssh import SshSession
@@ -31,27 +37,6 @@ ATTRIBUTE_LINE = re.compile(r"^([A-Za-z][A-Za-z0-9._-]*)(::?)(?: ?)(.*)$")
 HELP_COMMAND = re.compile(r"^\s*([A-Za-z][A-Za-z0-9]*)\(([^)]+)\)", re.MULTILINE)
 MAILBOX_OUTPUT_OPTION = re.compile(r"(?:^|\s)(?:-o/--output|--output|-o(?:\s|$))")
 QUERY_SAFE = ":/*@"
-MISSING_OBJECT_MARKERS = (
-    "account.no_such_account",
-    "account.no_such_calendar_resource",
-    "account.no_such_cos",
-    "account.no_such_distribution_list",
-    "account.no_such_domain",
-    "account.no_such_group",
-    "account.no_such_server",
-)
-ALREADY_EXISTS_MARKERS = (
-    "account.account_exists",
-    "account.alias_exists",
-    "account.cos_exists",
-    "account.data_source_exists",
-    "account.distribution_list_exists",
-    "account.domain_exists",
-    "account.identity_exists",
-    "account.member_exists",
-    "account.server_exists",
-    "account.signature_exists",
-)
 
 
 def required_export_commands(transfer: TransferConfig) -> set[str]:
@@ -815,12 +800,12 @@ def _require_mailbox_host(value: str, *, detail: str | None = None) -> str:
 
 
 def is_missing_object_error(error: CommandError) -> bool:
-    diagnostic = str(error).casefold()
+    diagnostic = error.zimbra_code or str(error).casefold()
     return any(marker in diagnostic for marker in MISSING_OBJECT_MARKERS)
 
 
 def is_already_exists_error(error: CommandError) -> bool:
-    diagnostic = str(error).casefold()
+    diagnostic = error.zimbra_code or str(error).casefold()
     return any(marker in diagnostic for marker in ALREADY_EXISTS_MARKERS)
 
 
