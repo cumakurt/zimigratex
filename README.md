@@ -157,6 +157,8 @@ and run:
 ```
 
 On a TTY this shows the category menu. Enter accepts every default (all categories).
+Choose `6. Everything except mailbox data` to export accounts and configuration
+without mailbox content.
 The command writes:
 
 ```text
@@ -220,7 +222,8 @@ Do not copy `export_data` while zimigrate is running.
 
 ### 4. One account or one domain
 
-A scoped run skips the category prompt. Dependencies are included automatically.
+On a TTY, scoped runs also show the category menu, including option `6` to omit
+mailbox data. Dependencies are included automatically.
 
 ```bash
 ./export.sh --user user@example.com
@@ -285,6 +288,9 @@ Then it asks:
 2. The category menu (only categories that exist in that archive).
 
 Only the chosen scope and categories are imported.
+Choose `6. Everything except mailbox data` in the category menu to restore the
+available accounts and configuration without importing mailbox content, even from
+an archive that contains mailboxes.
 
 If stdin is not a TTY, or `--archive` is given, the picker is skipped
 (default `./export_data` unless `--archive` is set).
@@ -399,8 +405,10 @@ PYTHONPATH=src python scripts/generate-readme-screenshots.py
 
 ## Interactive menus
 
-Shown only when stdin is a TTY and the run is not already scoped by `--user` /
-`--domain` (or a locked resume).
+Category menus are shown when stdin is a TTY and operator prompts are enabled,
+including runs scoped by `--user` / `--domain` and resumed operations. On resume,
+Enter keeps the locked categories; changing them requires a new export archive
+or a copied import archive with a fresh state database.
 
 ### Category menu (export and import)
 

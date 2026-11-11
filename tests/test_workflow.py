@@ -5,8 +5,10 @@ import unittest
 import zipfile
 from dataclasses import replace
 from pathlib import Path
+from unittest.mock import patch
 
 from zimigrate.archive import MigrationArchive
+from zimigrate.cli import _configure_export_categories, _configure_import_categories
 from zimigrate.config import (
     AppConfig,
     EndpointConfig,
@@ -22,6 +24,49 @@ from zimigrate.target_verifier import TargetVerifier
 
 
 class WorkflowTests(unittest.TestCase):
+    def test_without_mailboxes_preserves_accounts_and_configuration(self) -> None:
+        for full_export in (False, True):
+            with self.subTest(full_export=full_export), tempfile.TemporaryDirectory() as directory:
+                config = _config()
+                archive = MigrationArchive(Path(directory) / "archive", create=True)
+                if not full_export:
+                    with (
+                        patch("zimigrate.cli._is_interactive", return_value=True),
+                        patch("builtins.input", return_value="6"),
+                    ):
+                        config = _configure_export_categories(config, archive)
+                exporter = Exporter(config, archive)
+                source = FakeSource()
+                exporter.client = source
+                with (
+                    patch.object(source, "preflight", return_value="Release 8.8.15.GA FOSS"),
+                    patch.object(source, "export_mailbox", wraps=source.export_mailbox) as mailbox,
+                ):
+                    exporter.run()
+                self.assertEqual(mailbox.call_count, int(full_export))
+                account = archive.read_entity("account", "user@example.com")
+                self.assertEqual(bool(account.artifacts), full_export)
+
+                with (
+                    patch("zimigrate.cli._is_interactive", return_value=True),
+                    patch("builtins.input", side_effect=["1", "6"]),
+                ):
+                    config = _configure_import_categories(_config(), archive)
+                target = FakeTarget(Path(directory))
+                importer = Importer(config, archive)
+                importer.client = target
+                # Use the temporary filesystem as the simulated Zimbra installation.
+                with patch("zimigrate.importer.Path", return_value=Path(directory)):
+                    importer.run()
+                self.assertEqual(target.mailbox_imports, 0)
+                self.assertIn(("domain", "example.com"), target.objects)
+                self.assertIn(("account", "user@example.com"), target.objects)
+                self.assertIn("member@example.com", target.members["team@example.com"])
+                self.assertTrue(any("userPassword" in operation for operation in target.mutations))
+                verifier = TargetVerifier(config, archive)
+                verifier.client = target
+                self.assertEqual(verifier.run()["mismatches"], 0)
+
     def test_non_strict_attribute_rejections_remain_warnings_during_verification(self) -> None:
         class UnsupportedAttributeSource(FakeSource):
             def get_account(self, name: str) -> dict[str, list[str]]:

@@ -425,6 +425,7 @@ def _configure_import_categories(
     config: AppConfig,
     archive: MigrationArchive,
 ) -> AppConfig:
+    interactive = _is_interactive()
     cli_scope = scope_from_transfer(config.transfer)
     bound = archive.state.get("import:configuration", "options")
     if bound and bound.status == "success":
@@ -447,6 +448,18 @@ def _configure_import_categories(
                     )
                     if options.get(field, True)
                 }
+                if interactive:
+                    chosen = prompt_categories(
+                        "import",
+                        available=exported_categories(archive.manifest().get("export_options")),
+                        defaults=selected,
+                    )
+                    if chosen != selected:
+                        raise ConfigurationError(
+                            "This import already started with different categories; "
+                            "use a copied archive with a fresh state database "
+                            "to change the selection"
+                        )
                 transfer = transfer_with_categories(config.transfer, selected)
                 if bound_scope.active:
                     transfer = apply_scope_to_transfer(transfer, bound_scope)
@@ -462,13 +475,17 @@ def _configure_import_categories(
             "Limiting import to selected users and domains",
             extra={**cli_scope.as_options(), "event": "inventory"},
         )
-        return config
+        if not interactive:
+            return config
     domain_records = list(archive.iter_entities("domain")) if "domains" in available else []
     domain_names = [record.name for record in domain_records]
     defaults = available.intersection(selected_categories(config.transfer))
     selected_domains: list[str] = []
-    if _is_interactive():
-        if prompt_import_scope(has_domains=bool(domain_names)) == "domains":
+    if interactive:
+        if (
+            not cli_scope.active
+            and prompt_import_scope(has_domains=bool(domain_names)) == "domains"
+        ):
             selected_domains = prompt_domain_selection(domain_names)
         selected = prompt_categories(
             "import",

@@ -159,6 +159,8 @@ Depoyu kaynak Zimbra’ya koyun, büyük bir volume’e `cd` edin:
 ```
 
 TTY’de kategori menüsü çıkar. Enter tüm varsayılanları (tüm kategoriler) seçer.
+Mailbox içeriği olmadan hesapları ve ayarları export etmek için
+`6. Everything except mailbox data` seçeneğini seçin.
 Çıktı:
 
 ```text
@@ -221,7 +223,8 @@ politikaları checkpoint’e kilitlenir, devam sırasında sessizce değişmez.
 
 ### 4. Tek hesap veya tek domain
 
-Kapsamlı çalışma kategori menüsünü atlar. Bağımlılıklar otomatik eklenir.
+TTY’de kullanıcı/domain ile sınırlandırılan çalışmalarda da kategori menüsü
+gösterilir. `6` seçeneği mailbox verisini hariç tutar. Bağımlılıklar otomatik eklenir.
 
 ```bash
 ./export.sh --user user@example.com
@@ -286,6 +289,9 @@ Ardından sorulur:
 2. Kategori menüsü (yalnızca o arşivde bulunan kategoriler).
 
 Yalnızca seçilen kapsam ve kategoriler içeri alınır.
+Kategori menüsünde `6. Everything except mailbox data` seçilirse, arşiv mailleri
+içerse bile yalnızca kullanılabilir hesaplar ve ayarlar import edilir; mailbox
+içeriği aktarılmaz.
 
 stdin TTY değilse veya `--archive` verilmişse seçici atlanır (varsayılan
 `./export_data`, `--archive` varsa o yol).
@@ -401,8 +407,10 @@ PYTHONPATH=src python scripts/generate-readme-screenshots.py
 
 ## Etkileşimli menüler
 
-Yalnızca stdin TTY iken ve çalışma `--user` / `--domain` (veya kilitli devam)
-ile zaten kapsamlı değilse gösterilir.
+Kategori menüsü stdin TTY iken ve operatör soruları etkinken gösterilir;
+`--user` / `--domain` ile sınırlandırılan ve devam ettirilen işlemler buna dahildir.
+Devam ederken Enter kilitli kategorileri korur. Kategorileri değiştirmek için
+export’ta yeni bir arşiv, import’ta temiz bir state veritabanına sahip arşiv kopyası gerekir.
 
 ### Kategori menüsü (export ve import)
 
