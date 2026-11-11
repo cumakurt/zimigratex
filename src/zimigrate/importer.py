@@ -822,15 +822,25 @@ class Importer:
 
     def _destination_id_mapping(self, records: list[EntityRecord]) -> dict[str, str]:
         mapping: dict[str, str] = {}
-        for record in records:
+
+        def resolve(record: EntityRecord) -> str | None:
             if not record.source_id:
-                continue
+                return None
             complete = self.archive.state.get("import:account-complete", record.name)
             if complete and complete.detail == "skipped-system-account":
-                continue
+                return None
             attributes = self._destination_object_attributes(record.kind, record.name)
-            if destination_id := first(attributes, "zimbraId"):
-                mapping[record.source_id] = destination_id
+            return first(attributes, "zimbraId")
+
+        progress = PhaseProgress(LOGGER, kind="object-id", total=len(records), action="import")
+        with WorkerPool(self.config.transfer.workers, "import-object-id") as executor:
+            for record, future in bounded_futures(
+                executor, records, resolve, max_pending=self.config.transfer.workers * 2
+            ):
+                destination_id = future.result()
+                if record.source_id and destination_id:
+                    mapping[record.source_id] = destination_id
+                progress.complete(record.name)
         return mapping
 
     def _import_access_control(
