@@ -567,6 +567,20 @@ class ZimbraCommandTests(unittest.TestCase):
             self.client.create("account", "user@example.com")
         self.assertTrue(is_already_exists_error(CommandError("account.ACCOUNT_EXISTS")))
 
+    def test_default_calendar_callback_uses_soap_separately_from_password(self) -> None:
+        self.client.modify(
+            "account",
+            "user@example.com",
+            ["userPassword", "{SSHA}hash", "zimbraPrefDefaultCalendarId", "10"],
+            sensitive=True,
+        )
+        calls = self.client.runner.run.call_args_list
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(calls[0].args[0], [ZMPROV, "-l"])
+        self.assertEqual(calls[1].args[0], [ZMPROV])
+        self.assertIn(b"zimbraPrefDefaultCalendarId", calls[1].kwargs["input_data"])
+        self.assertNotIn(b"userPassword", calls[1].kwargs["input_data"])
+
     def test_sensitive_account_modify_uses_ldap_direct_stdin(self) -> None:
         self.client.modify(
             "account",

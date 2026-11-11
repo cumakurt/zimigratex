@@ -513,15 +513,29 @@ class ZimbraClient:
             "distribution_list": "mdl",
             "dynamic_distribution_list": "mdl",
         }[kind]
-        self._zmprov(
-            command,
-            name,
-            *operations,
-            ldap=True,
-            retryable=True,
-            sensitive=sensitive,
-            protect_arguments=True,
-        )
+        ldap_operations: list[str] = []
+        mailbox_operations: list[str] = []
+        for attribute, value in zip(operations[::2], operations[1::2], strict=True):
+            # This callback opens the mailbox database, which LDAP-only zmprov
+            # does not initialize. Run it inside mailboxd through SOAP.
+            target = (
+                mailbox_operations
+                if kind in {"account", "calendar_resource"}
+                and attribute.lstrip("+-") == "zimbraPrefDefaultCalendarId"
+                else ldap_operations
+            )
+            target.extend([attribute, value])
+        for pending, ldap in ((ldap_operations, True), (mailbox_operations, False)):
+            if pending:
+                self._zmprov(
+                    command,
+                    name,
+                    *pending,
+                    ldap=ldap,
+                    retryable=True,
+                    sensitive=sensitive,
+                    protect_arguments=True,
+                )
 
     def add_account_alias(self, account: str, alias: str) -> None:
         self._add_idempotent("aaa", account, alias)
