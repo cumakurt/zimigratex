@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 from collections import Counter
@@ -11,7 +12,9 @@ from zimigrate.attributes import SIGNATURE_REFERENCE_ATTRIBUTES, first, mutable_
 from zimigrate.config import AppConfig
 from zimigrate.data_source import decrypt_data_source_secrets
 from zimigrate.errors import CompatibilityError, ZimigrateError
+from zimigrate.interrupt import WorkerPool, bounded_futures
 from zimigrate.models import Attributes, EntityRecord
+from zimigrate.progress import PhaseProgress
 from zimigrate.scope import (
     filter_cos_records,
     filter_distribution_records,
@@ -380,15 +383,29 @@ class TargetVerifier:
         self, records: list[EntityRecord], *, import_started: bool
     ) -> dict[str, str]:
         mapping: dict[str, str] = {}
-        for record in records:
-            if (
-                not record.source_id
-                or (import_started and not self._was_imported(record))
-                or not self._exists(record)
+        eligible = [
+            record
+            for record in records
+            if record.source_id and (not import_started or self._was_imported(record))
+        ]
+        progress = PhaseProgress(
+            logging.getLogger(__name__), kind="object-id", total=len(eligible), action="verify"
+        )
+        with WorkerPool(self.config.transfer.workers, "verify-object-id") as executor:
+            for record, future in bounded_futures(
+                executor,
+                eligible,
+                self._lookup_destination,
+                max_pending=self.config.transfer.workers * 2,
             ):
-                continue
-            if target_id := first(self._attributes(record), "zimbraId"):
-                mapping[record.source_id] = target_id
+                attributes = future.result()
+                key = (record.kind, record.name)
+                self._existence_cache[key] = attributes is not None
+                if attributes is not None:
+                    self._attribute_cache[key] = attributes
+                    if record.source_id and (target_id := first(attributes, "zimbraId")):
+                        mapping[record.source_id] = target_id
+                progress.complete(record.name)
         return mapping
 
     def _exists(self, record: EntityRecord) -> bool:
