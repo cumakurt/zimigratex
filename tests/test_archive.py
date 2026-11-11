@@ -17,6 +17,22 @@ from zimigrate.verifier import verify_archive
 
 
 class ArchiveTests(unittest.TestCase):
+    def test_legacy_member_trailer_is_repaired_without_changing_archive_bytes(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            archive = MigrationArchive(Path(directory), create=True)
+            record = EntityRecord(
+                kind="distribution_list",
+                name="list@example.com",
+                attributes={"zimbraPrefReplyToEnabled": ["FALSE\n\nmembers\nu@example.com"]},
+                members=["u@example.com"],
+            )
+            relative, checksum = archive.write_entity(record)
+            loaded = archive.read_entity(record.kind, record.name)
+            self.assertEqual(loaded.attributes["zimbraPrefReplyToEnabled"], ["FALSE"])
+            self.assertEqual(loaded.members, record.members)
+            self.assertEqual(sha256_file(Path(directory) / relative), checksum)
+            archive.state.close()
+
     def test_entity_and_mailbox_roundtrip(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory) / "archive"

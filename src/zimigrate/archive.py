@@ -148,6 +148,22 @@ class MigrationArchive:
         expected_relative = self.entity_relative_path(record.kind, record.name)
         if relative != expected_relative:
             raise ArchiveError(f"Archive record path does not match its identity: {relative}")
+        if record.kind in {"distribution_list", "dynamic_distribution_list"}:
+            # Legacy gdl parsing appended the CLI member section to the final
+            # attribute. Repair only when it matches the separately saved members.
+            expected_members = set(record.members)
+            for name, values in record.attributes.items():
+                normalized = []
+                for value in values:
+                    head, separator, tail = value.partition("\n\nmembers")
+                    if (
+                        separator
+                        and (not tail or tail.startswith("\n"))
+                        and (set(tail.splitlines()) - {""} == expected_members)
+                    ):
+                        value = head
+                    normalized.append(value)
+                record.attributes[name] = normalized
         return record
 
     def mailbox_relative_path(self, account: str, label: str, archive_format: str = "tgz") -> str:
