@@ -88,13 +88,7 @@ def first(attributes: Attributes, name: str, default: str | None = None) -> str 
 
 def without_secrets(attributes: Attributes) -> Attributes:
     return {
-        name: [
-            value.rstrip("\r\n")
-            if name == "zimbraZimletUserPropertiesMaxNumEntries"
-            and re.fullmatch(r"[0-9]+[\r\n]+", value)
-            else value
-            for value in values
-        ]
+        name: list(values)
         for name, values in attributes.items()
         if not SENSITIVE_ATTRIBUTE.search(name)
     }
@@ -102,17 +96,29 @@ def without_secrets(attributes: Attributes) -> Attributes:
 
 def exportable_attributes(attributes: Attributes, *, include_secrets: bool) -> Attributes:
     result = {
-        name: [
-            value.rstrip("\r\n")
-            if name == "zimbraZimletUserPropertiesMaxNumEntries"
-            and re.fullmatch(r"[0-9]+[\r\n]+", value)
-            else value
-            for value in values
-        ]
+        name: list(values)
         for name, values in attributes.items()
         if name not in NEVER_EXPORT_ATTRIBUTES
     }
     return result if include_secrets else without_secrets(result)
+
+
+def _legacy_attribute_value(name: str, value: str) -> str:
+    # Older exports treated CLI record separators and gdl's member section as
+    # continuations of the final scalar attribute. Preserve multiline payloads.
+    if name == "zimbraMailStatus":
+        head = value.split("\n", 1)[0]
+        if head in {"enabled", "disabled"} and (
+            value == head + "\n\nmembers" or value.startswith(head + "\n\nmembers\n")
+        ):
+            return head
+    patterns = {
+        "zimbraZimletUserPropertiesMaxNumEntries": r"[0-9]+[\r\n]+",
+        "zimbraZimletDataSensitiveInMixedModeDisabled": r"(?:TRUE|FALSE)[\r\n]+",
+    }
+    if name in patterns and re.fullmatch(patterns[name], value):
+        return value.rstrip("\r\n")
+    return value
 
 
 def mutable_attributes(
@@ -125,13 +131,7 @@ def mutable_attributes(
     blocked = COMMON_READ_ONLY | KIND_READ_ONLY.get(kind, set()) | LDAP_BINARY_TRANSFER_ATTRIBUTES
     allowed = set(allowlist) if allowlist is not None else None
     return {
-        name: [
-            value.rstrip("\r\n")
-            if name == "zimbraZimletUserPropertiesMaxNumEntries"
-            and re.fullmatch(r"[0-9]+[\r\n]+", value)
-            else value
-            for value in values
-        ]
+        name: [_legacy_attribute_value(name, value) for value in values]
         for name, values in attributes.items()
         if name not in blocked
         and (allowed is None or name in allowed)

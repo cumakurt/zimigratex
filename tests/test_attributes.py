@@ -86,6 +86,17 @@ class AttributeTests(unittest.TestCase):
             {"zimbraPrefFromAddress": ["user@example.com"]},
         )
 
+    def test_legacy_distribution_member_section_is_not_a_mail_status(self) -> None:
+        self.assertEqual(
+            mutable_attributes(
+                "distribution_list",
+                {
+                    "zimbraMailStatus": ["enabled\n\nmembers\nuser@example.com"],
+                },
+            ),
+            {"zimbraMailStatus": ["enabled"]},
+        )
+
     def test_flatten_operations_replaces_multivalues_without_mixing_modifiers(self) -> None:
         self.assertEqual(
             flatten_operations([("zimbraMailForwardingAddress", ["a@x", "b@x"])]),

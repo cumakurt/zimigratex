@@ -736,9 +736,10 @@ class ZimbraClient:
         sensitive: bool = False,
         retryable: bool = True,
     ) -> Attributes:
-        return parse_attributes(
-            self._zmprov(command, name, ldap=ldap, retryable=retryable, sensitive=sensitive)
-        )
+        output = self._zmprov(command, name, ldap=ldap, retryable=retryable, sensitive=sensitive)
+        if command == "gdl":
+            output = re.split(r"\n\nmembers(?:\n|$)", output, maxsplit=1)[0]
+        return parse_attributes(output)
 
     def _get_sections(
         self, command: str, account: str, *, sensitive: bool = False
