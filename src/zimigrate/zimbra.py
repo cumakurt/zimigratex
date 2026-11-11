@@ -366,7 +366,7 @@ class ZimbraClient:
         return self._get("gdl", name, ldap=True, sensitive=True)
 
     def get_distribution_list_members(self, name: str) -> list[str]:
-        return self._list("gdlm", name, ldap=True)
+        return [member for member in self._list("gdlm", name, ldap=True) if member != "members"]
 
     def get_server(self, name: str) -> Attributes:
         return self._get("gs", name, ldap=True, sensitive=True)

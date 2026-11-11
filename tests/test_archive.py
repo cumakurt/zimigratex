@@ -24,12 +24,12 @@ class ArchiveTests(unittest.TestCase):
                 kind="distribution_list",
                 name="list@example.com",
                 attributes={"zimbraPrefReplyToEnabled": ["FALSE\n\nmembers\nu@example.com"]},
-                members=["u@example.com"],
+                members=["members", "u@example.com"],
             )
             relative, checksum = archive.write_entity(record)
             loaded = archive.read_entity(record.kind, record.name)
             self.assertEqual(loaded.attributes["zimbraPrefReplyToEnabled"], ["FALSE"])
-            self.assertEqual(loaded.members, record.members)
+            self.assertEqual(loaded.members, ["u@example.com"])
             self.assertEqual(sha256_file(Path(directory) / relative), checksum)
             archive.state.close()
 

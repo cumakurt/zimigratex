@@ -151,6 +151,7 @@ class MigrationArchive:
         if record.kind in {"distribution_list", "dynamic_distribution_list"}:
             # Legacy gdl parsing appended the CLI member section to the final
             # attribute. Repair only when it matches the separately saved members.
+            record.members = [member for member in record.members if member != "members"]
             expected_members = set(record.members)
             for name, values in record.attributes.items():
                 normalized = []
