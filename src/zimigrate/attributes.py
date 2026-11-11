@@ -76,7 +76,7 @@ KIND_READ_ONLY: dict[str, set[str]] = {
     "dynamic_distribution_list": {"name"},
     "server": {"name", "zimbraServiceHostname"},
     "signature": {"name", "zimbraSignatureName"},
-    "identity": {"name", "zimbraPrefIdentityName"},
+    "identity": {"name", "zimbraPrefIdentityName", "zimbraPrefIdentityId"},
     "data_source": {"name", "zimbraDataSourceName", "zimbraDataSourceType"},
 }
 

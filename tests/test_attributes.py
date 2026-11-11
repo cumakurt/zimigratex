@@ -74,6 +74,18 @@ class AttributeTests(unittest.TestCase):
         )
         self.assertEqual(attrs["zimbraZimletUserPropertiesMaxNumEntries"], ["150\n"])
 
+    def test_source_identity_id_is_not_applied_to_destination(self) -> None:
+        self.assertEqual(
+            mutable_attributes(
+                "identity",
+                {
+                    "zimbraPrefIdentityId": ["source-id"],
+                    "zimbraPrefFromAddress": ["user@example.com"],
+                },
+            ),
+            {"zimbraPrefFromAddress": ["user@example.com"]},
+        )
+
     def test_flatten_operations_replaces_multivalues_without_mixing_modifiers(self) -> None:
         self.assertEqual(
             flatten_operations([("zimbraMailForwardingAddress", ["a@x", "b@x"])]),
