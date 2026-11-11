@@ -88,7 +88,13 @@ def first(attributes: Attributes, name: str, default: str | None = None) -> str 
 
 def without_secrets(attributes: Attributes) -> Attributes:
     return {
-        name: list(values)
+        name: [
+            value.rstrip("\r\n")
+            if name == "zimbraZimletUserPropertiesMaxNumEntries"
+            and re.fullmatch(r"[0-9]+[\r\n]+", value)
+            else value
+            for value in values
+        ]
         for name, values in attributes.items()
         if not SENSITIVE_ATTRIBUTE.search(name)
     }
@@ -96,7 +102,13 @@ def without_secrets(attributes: Attributes) -> Attributes:
 
 def exportable_attributes(attributes: Attributes, *, include_secrets: bool) -> Attributes:
     result = {
-        name: list(values)
+        name: [
+            value.rstrip("\r\n")
+            if name == "zimbraZimletUserPropertiesMaxNumEntries"
+            and re.fullmatch(r"[0-9]+[\r\n]+", value)
+            else value
+            for value in values
+        ]
         for name, values in attributes.items()
         if name not in NEVER_EXPORT_ATTRIBUTES
     }
@@ -113,7 +125,13 @@ def mutable_attributes(
     blocked = COMMON_READ_ONLY | KIND_READ_ONLY.get(kind, set()) | LDAP_BINARY_TRANSFER_ATTRIBUTES
     allowed = set(allowlist) if allowlist is not None else None
     return {
-        name: list(values)
+        name: [
+            value.rstrip("\r\n")
+            if name == "zimbraZimletUserPropertiesMaxNumEntries"
+            and re.fullmatch(r"[0-9]+[\r\n]+", value)
+            else value
+            for value in values
+        ]
         for name, values in attributes.items()
         if name not in blocked
         and (allowed is None or name in allowed)

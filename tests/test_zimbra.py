@@ -52,6 +52,12 @@ is current: true
             {"primaryMessage": [Path("/opt/zimbra/store")]},
         )
 
+    def test_record_separator_is_not_appended_to_last_attribute(self) -> None:
+        self.assertEqual(
+            parse_attributes("zimbraZimletUserPropertiesMaxNumEntries: 150\n\n"),
+            {"zimbraZimletUserPropertiesMaxNumEntries": ["150"]},
+        )
+
     def test_attributes_preserve_repeated_and_multiline_values(self) -> None:
         output = """# name user@example.com
 zimbraMailAlias: first@example.com

@@ -130,7 +130,7 @@ def parse_attributes(output: str) -> Attributes:
     binary_values: dict[str, list[bool]] = {}
     previous: str | None = None
     previous_binary = False
-    for raw_line in output.splitlines():
+    for raw_line in _trim_section(output.splitlines()):
         if raw_line.startswith("# name "):
             previous = None
             previous_binary = False

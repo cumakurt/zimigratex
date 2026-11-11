@@ -66,6 +66,14 @@ class AttributeTests(unittest.TestCase):
 
         self.assertEqual(result, {"displayName": ["Example User"]})
 
+    def test_legacy_numeric_record_separator_is_removed_without_mutating_archive(self) -> None:
+        attrs = {"zimbraZimletUserPropertiesMaxNumEntries": ["150\n"]}
+        self.assertEqual(
+            mutable_attributes("account", attrs),
+            {"zimbraZimletUserPropertiesMaxNumEntries": ["150"]},
+        )
+        self.assertEqual(attrs["zimbraZimletUserPropertiesMaxNumEntries"], ["150\n"])
+
     def test_flatten_operations_replaces_multivalues_without_mixing_modifiers(self) -> None:
         self.assertEqual(
             flatten_operations([("zimbraMailForwardingAddress", ["a@x", "b@x"])]),
