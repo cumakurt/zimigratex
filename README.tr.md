@@ -217,7 +217,8 @@ mailbox dosyaları checksum ve boyutla eşleşiyorsa yeniden kullanılır.
 
 Ortadaki `--user` / `--domain` değişikliği için export’ta **yeni** arşiv dizini,
 import’ta taze `state.sqlite3` olan bir kopya gerekir. İlk import denemesinin
-politikaları checkpoint’e kilitlenir, devam sırasında sessizce değişmez.
+politikaları checkpoint’e kilitlenir. Devam ederken mevcut nesne politikası
+`merge` veya `fail` değerinden `skip` değerine geçirilebilir; diğer ayarlar kilitli kalır.
 
 `zimigrate` çalışırken `export_data` kopyalamayın.
 
@@ -505,8 +506,13 @@ tekrar çalıştırın.
 ## İsteğe bağlı yapılandırma
 
 Dosya olmadan varsayılanlar: tüm normal hesaplar, mailbox içeriği ve görünen
-secret hash’ler, sekiz worker, mevcut nesnelerde merge, mailbox çakışmasında
+secret hash’ler, sekiz worker, mevcut nesneleri atlama, mailbox çakışmasında
 skip, sıkı öznitelikler, REST `meta=1` ve `lock=1`.
+
+Mevcut domain, hesap, COS, kaynak ve dağıtım listeleri değiştirilmeden atlanır;
+atlama loga yazılır. Eksik nesneler normal olarak import edilir. Bu aktarımın
+oluşturduğu yarım kalmış nesneler kaldığı yerden devam eder. Mevcut nesneleri
+güncellemek isterseniz TOML dosyasının `[import]` bölümünde `existing_policy = "merge"` kullanın.
 
 ```bash
 cp config.example.toml migration.toml
@@ -543,7 +549,7 @@ Yararlı `[import]` anahtarları:
 | Anahtar | Varsayılan | Not |
 | --- | --- | --- |
 | `expected_target_version_pattern` | `""` | Boş = preflight geçen her sürüm |
-| `existing_policy` | `"merge"` | `merge`, `skip` veya `fail` |
+| `existing_policy` | `"skip"` | `skip`: mevcut nesneleri atla; `merge`: güncelle; `fail`: dur |
 | `mailbox_conflict_resolution` | `"skip"` | `skip`, `modify`, `replace` veya `reset` |
 | `strict_attributes` | `true` | Şema reddi importu durdurur |
 | `import_system_accounts` | `false` | Bilinçli değilse kapalı tutun |

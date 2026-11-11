@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import json
 import tempfile
 import unittest
 import zipfile
+from copy import deepcopy
 from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
@@ -24,6 +26,110 @@ from zimigrate.target_verifier import TargetVerifier
 
 
 class WorkflowTests(unittest.TestCase):
+    def test_existing_entity_types_are_skipped_without_mutations(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            archive = MigrationArchive(Path(directory) / "archive", create=True)
+            target = FakeTarget(Path(directory))
+            importer = Importer(_config(), archive)
+            importer.client = target
+            for kind in (
+                "cos",
+                "domain",
+                "account",
+                "calendar_resource",
+                "distribution_list",
+                "dynamic_distribution_list",
+                "alias_domain",
+            ):
+                with self.subTest(kind=kind):
+                    record_kind = "domain" if kind == "alias_domain" else kind
+                    name = f"{kind}@example.com"
+                    target_kind = (
+                        "distribution_list" if kind == "dynamic_distribution_list" else record_kind
+                    )
+                    target.objects[(target_kind, name)] = {"zimbraId": [f"target-{kind}"]}
+                    record = EntityRecord(kind=record_kind, name=name, attributes={})
+                    if kind == "alias_domain":
+                        self.assertFalse(importer._import_alias_domain(record, "example.com"))
+                    else:
+                        self.assertFalse(importer._import_basic_entity(record))
+                    self.assertEqual(
+                        archive.state.get(f"import:{record_kind}", name).detail, "skipped-existing"
+                    )
+            self.assertEqual(target.mutations, [])
+
+    def test_existing_objects_are_unchanged_while_missing_objects_are_imported(self) -> None:
+        objects = (
+            ("domain", "example.com"),
+            ("account", "user@example.com"),
+            ("distribution_list", "team@example.com"),
+        )
+        for existing in ((*objects,), (objects[0],), (objects[1],), (objects[2],)):
+            with self.subTest(existing=existing), tempfile.TemporaryDirectory() as directory:
+                config = _config()
+                archive = MigrationArchive(Path(directory) / "archive", create=True)
+                exporter = Exporter(config, archive)
+                exporter.client = FakeSource()
+                exporter.run()
+                target = FakeTarget(Path(directory))
+                for kind, name in existing:
+                    target.objects[(kind, name)] = {
+                        "zimbraId": [f"existing-{kind}"],
+                        "displayName": ["Destination value"],
+                        "zimbraAccountStatus": ["active"],
+                    }
+                if objects[2] in existing:
+                    target.members["team@example.com"] = {"keep@example.com"}
+                original = deepcopy(target.objects)
+                original_members = deepcopy(target.members)
+                importer = Importer(config, archive)
+                importer.client = target
+                with self.assertLogs("zimigrate.importer", level="INFO") as logs:
+                    importer.run()
+                self.assertIn("Skipping existing destination", "\n".join(logs.output))
+                for key, attributes in original.items():
+                    self.assertEqual(target.objects[key], attributes)
+                for name, members in original_members.items():
+                    self.assertEqual(target.members[name], members)
+                for key in objects:
+                    self.assertIn(key, target.objects)
+                self.assertEqual(target.mailbox_imports, int(objects[1] not in existing))
+                for kind, name in existing:
+                    self.assertEqual(
+                        archive.state.get(f"import:{kind}", name).detail, "skipped-existing"
+                    )
+                verifier = TargetVerifier(config, archive)
+                verifier.client = target
+                self.assertEqual(verifier.run()["mismatches"], 0)
+                mutation_count = len(target.mutations)
+                resumed = Importer(config, archive)
+                resumed.client = target
+                resumed.run()
+                self.assertEqual(len(target.mutations), mutation_count)
+
+    def test_resume_can_switch_to_skip_without_changing_other_options(self) -> None:
+        for policy in ("merge", "fail"):
+            with self.subTest(policy=policy), tempfile.TemporaryDirectory() as directory:
+                config = _config()
+                archive = MigrationArchive(Path(directory) / "archive", create=True)
+                previous = replace(
+                    config, import_options=replace(config.import_options, existing_policy=policy)
+                )
+                Importer(previous, archive)._bind_import_options()
+                Importer(config, archive)._bind_import_options()
+                bound = json.loads(archive.state.get("import:configuration", "options").detail)
+                self.assertEqual(bound["existing_policy"], "skip")
+                with self.assertRaisesRegex(ZimigrateError, "options differ"):
+                    Importer(previous, archive)._bind_import_options()
+                changed = replace(
+                    config,
+                    import_options=replace(
+                        config.import_options, mailbox_conflict_resolution="replace"
+                    ),
+                )
+                with self.assertRaisesRegex(ZimigrateError, "options differ"):
+                    Importer(changed, archive)._bind_import_options()
+
     def test_without_mailboxes_preserves_accounts_and_configuration(self) -> None:
         for full_export in (False, True):
             with self.subTest(full_export=full_export), tempfile.TemporaryDirectory() as directory:

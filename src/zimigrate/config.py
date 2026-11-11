@@ -77,7 +77,7 @@ class TransferConfig:
 @dataclass(frozen=True, slots=True)
 class ImportConfig:
     expected_target_version_pattern: str = ""
-    existing_policy: str = "merge"
+    existing_policy: str = "skip"
     mailbox_conflict_resolution: str = "skip"
     strict_attributes: bool = True
     mailhost_map: dict[str, str] = field(default_factory=dict)
@@ -276,7 +276,7 @@ def _import(raw: dict[str, Any]) -> ImportConfig:
             "",
             "import",
         ),
-        existing_policy=_string(raw, "existing_policy", "merge", "import"),
+        existing_policy=_string(raw, "existing_policy", "skip", "import"),
         mailbox_conflict_resolution=_string(raw, "mailbox_conflict_resolution", "skip", "import"),
         strict_attributes=_boolean(raw, "strict_attributes", True, "import"),
         mailhost_map=_string_mapping(mailhost_map, "import.mailhost_map"),

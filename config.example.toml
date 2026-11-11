@@ -45,7 +45,8 @@ mailbox_chunk_years = 5
 # Empty accepts any local Zimbra release that passes command preflight.
 # Set a regex only when the destination must match a specific version string.
 expected_target_version_pattern = ""
-existing_policy = "merge"
+# Leave existing destination objects unchanged and continue with missing objects.
+existing_policy = "skip"
 mailbox_conflict_resolution = "skip"
 # Stop on an unsupported target attribute by default. Set false only after reviewing
 # reports/import-warnings.ndjson; infrastructure errors still stop the import.

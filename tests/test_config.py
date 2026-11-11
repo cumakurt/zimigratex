@@ -21,6 +21,15 @@ class ConfigTests(unittest.TestCase):
         self.assertTrue(config.import_options.allows_version("Release 9.0.0.GA FOSS"))
         self.assertTrue(config.import_options.allows_version("Release 10.1.18.GA FOSS"))
         self.assertFalse(config.import_options.allow_unverified_remote_capacity)
+        self.assertEqual(config.import_options.existing_policy, "skip")
+
+    def test_existing_policy_override_is_preserved(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "config.toml"
+            for policy in ("skip", "merge", "fail"):
+                with self.subTest(policy=policy):
+                    path.write_text(f'[import]\nexisting_policy = "{policy}"\n', encoding="utf-8")
+                    self.assertEqual(load_config(path).import_options.existing_policy, policy)
 
     def test_removed_global_and_server_config_settings_are_rejected(self) -> None:
         values = (

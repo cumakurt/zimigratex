@@ -375,6 +375,7 @@ class Importer:
         if policy == "fail":
             raise ZimigrateError(f"Destination {label} already exists")
         if policy == "skip":
+            LOGGER.info("Skipping existing destination %s", label)
             return "skip"
         return "merge"
 
@@ -961,6 +962,8 @@ class Importer:
         if not state or state.status != "success":
             self.archive.state.start(phase, "options")
             self.archive.state.succeed(phase, "options", detail=value)
+        elif state.detail != value:
+            self.archive.state.succeed(phase, "options", detail=value)
 
     def _apply_resolved_scope(self) -> None:
         cli_scope = scope_from_transfer(self.config.transfer)
@@ -1053,6 +1056,13 @@ def _same_import_bind(previous: str | None, current: str) -> bool:
     current_value.setdefault("target_users", [])
     current_value.setdefault("target_domains", [])
     current_value.setdefault("allow_unverified_remote_capacity", False)
+    # Skipping untouched destination objects is safe on resume. Keep every other
+    # option locked, including the policy once it has changed to skip.
+    if current_value.get("existing_policy") == "skip" and previous_value.get("existing_policy") in {
+        "merge",
+        "fail",
+    }:
+        previous_value["existing_policy"] = "skip"
     return previous_value == current_value
 
 

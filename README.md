@@ -215,8 +215,9 @@ recorded checksum and size.
 
 Changing `--user` / `--domain` mid-archive requires a **new** archive directory
 (export) or a copied archive with a fresh `state.sqlite3` (import). Import policies
-from the first import attempt are locked in the checkpoint and cannot change silently
-on resume.
+from the first import attempt are locked in the checkpoint. The existing-object
+policy can change from `merge` or `fail` to `skip` on resume; all other options
+remain locked.
 
 Do not copy `export_data` while zimigrate is running.
 
@@ -502,8 +503,14 @@ again.
 ## Optional configuration
 
 Defaults without a file: all normal accounts, mailbox content and visible secret
-hashes, eight workers, merge existing objects, skip mailbox conflicts, strict
+hashes, eight workers, skip existing objects, skip mailbox conflicts, strict
 attributes, mailbox REST `meta=1` and `lock=1`.
+
+Existing domains, accounts, COS, resources, and distribution lists are left unchanged
+and logged as skipped. Missing objects are imported normally. Partially imported
+objects created by this migration still resume. To update existing objects instead,
+explicitly set `existing_policy = "merge"` in the `[import]` section of your TOML
+configuration.
 
 ```bash
 cp config.example.toml migration.toml
@@ -541,7 +548,7 @@ Useful `[import]` keys:
 | Key | Default | Notes |
 | --- | --- | --- |
 | `expected_target_version_pattern` | `""` | Empty = any preflight-passing release |
-| `existing_policy` | `"merge"` | `merge`, `skip`, or `fail` |
+| `existing_policy` | `"skip"` | `skip` leaves existing objects unchanged; `merge` updates them; `fail` stops |
 | `mailbox_conflict_resolution` | `"skip"` | `skip`, `modify`, `replace`, or `reset` |
 | `strict_attributes` | `true` | Schema rejection stops import |
 | `import_system_accounts` | `false` | Leave off unless you intend it |
