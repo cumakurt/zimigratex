@@ -749,8 +749,10 @@ class ZimbraClient:
             command_line.extend(["-s", soap_server])
         input_data = None
         if protect_arguments:
-            command_line.extend(["-f", "/dev/stdin"])
-            input_data = (_batch_line([command, *arguments]) + "\n").encode("utf-8")
+            # Read the inherited stdin directly: reopening /dev/stdin can fail
+            # after sudo changes users because the pipe belongs to its creator.
+            # Explicit exit makes interactive zmprov return prior command errors.
+            input_data = (_batch_line([command, *arguments]) + "\nexit\n").encode("utf-8")
         else:
             command_line.extend([command, *arguments])
         return self.runner.run(

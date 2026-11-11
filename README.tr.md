@@ -576,7 +576,9 @@ Arşiv provisioning kayıtları ve mailbox yükleri için SHA-256, atomik yazım
 mailbox içerikleri düz metindir. Worker gönderimi sınırlıdır. Yalnızca sınıflandırılmış
 geçici hatalar sınırlı üstel yeniden deneme alır. Geçici mailbox parçaları
 `export_data/.tmp` altındadır ve sonra silinir. Hassas `zmprov` değerleri proses
-argümanı değil stdin batch’tir.
+argümanlarına eklenmeden doğrudan standart girdiden iletilir. Böylece sudo ile
+`zimbra` kullanıcısına geçildikten sonra `/dev/stdin` yeniden açılmaz. Açıkça
+gönderilen `exit` komutu, Zimbra hatalarının çıkış koduna yansımasını sağlar.
 
 Mailbox protokolü Zimbra’nın
 [REST export/import referansını](https://github.com/Zimbra/zm-mailbox/blob/develop/store/docs/rest.txt)

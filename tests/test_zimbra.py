@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -200,11 +201,12 @@ class ZimbraCommandTests(unittest.TestCase):
         command = self.client.runner.run.call_args.args[0]
         self.assertEqual(
             command,
-            [ZMPROV, "-l", "-f", "/dev/stdin"],
+            [ZMPROV, "-l"],
         )
         self.assertEqual(
             self.client.runner.run.call_args.kwargs["input_data"],
-            b"'ccr' 'room@example.com' '' 'displayName' 'Room' 'zimbraCalResType' 'Location'\n",
+            b"'ccr' 'room@example.com' '' 'displayName' 'Room' "
+            b"'zimbraCalResType' 'Location'\nexit\n",
         )
 
     def test_dynamic_distribution_list_uses_official_command(self) -> None:
@@ -461,12 +463,37 @@ class ZimbraCommandTests(unittest.TestCase):
             ["zimbraAccountStatus", "maintenance"],
         )
         command = self.client.runner.run.call_args.args[0]
-        self.assertEqual(command, [ZMPROV, "-l", "-f", "/dev/stdin"])
+        self.assertEqual(command, [ZMPROV, "-l"])
         self.assertEqual(
             self.client.runner.run.call_args.kwargs["input_data"],
-            b"'ca' 'user@example.com' '' 'zimbraAccountStatus' 'maintenance'\n",
+            b"'ca' 'user@example.com' '' 'zimbraAccountStatus' 'maintenance'\nexit\n",
         )
         self.assertTrue(self.client.runner.run.call_args.kwargs.get("retryable"))
+
+    def test_stdin_command_returns_interactive_zimbra_failure(self) -> None:
+        client = ZimbraClient(EndpointConfig(), retries=0, retry_base_seconds=0)
+        # Like ProvUtil, report a command failure but return its failure status
+        # only on explicit exit; EOF by itself would report success.
+        interpreter = (
+            "import sys\n"
+            "for line in sys.stdin:\n"
+            "    if line.strip() == 'exit':\n"
+            "        sys.exit(2)\n"
+            "    print('ERROR: account.INVALID_ATTR_VALUE (secret-value)', "
+            "file=sys.stderr)\n"
+        )
+        with (
+            patch.object(
+                client.runner,
+                "_transport_command",
+                return_value=[sys.executable, "-c", interpreter],
+            ),
+            self.assertRaises(CommandError) as caught,
+        ):
+            client.create("account", "user@example.com")
+        self.assertEqual(caught.exception.returncode, 2)
+        self.assertTrue(caught.exception.attribute_rejection)
+        self.assertNotIn("secret-value", str(caught.exception))
 
     def test_exists_retries_transient_failures(self) -> None:
         self.client.runner.run.return_value = CommandResult(
@@ -547,10 +574,10 @@ class ZimbraCommandTests(unittest.TestCase):
             sensitive=True,
         )
         command = self.client.runner.run.call_args.args[0]
-        self.assertEqual(command, [ZMPROV, "-l", "-f", "/dev/stdin"])
+        self.assertEqual(command, [ZMPROV, "-l"])
         self.assertEqual(
             self.client.runner.run.call_args.kwargs["input_data"],
-            b"'ma' 'user@example.com' 'userPassword' '{SSHA}hash'\n",
+            b"'ma' 'user@example.com' 'userPassword' '{SSHA}hash'\nexit\n",
         )
 
     def test_calendar_resource_list_does_not_swallow_failures(self) -> None:
@@ -571,12 +598,12 @@ class ZimbraCommandTests(unittest.TestCase):
         )
 
         command = self.client.runner.run.call_args.args[0]
-        self.assertEqual(command, [ZMPROV, "-l", "-f", "/dev/stdin"])
+        self.assertEqual(command, [ZMPROV, "-l"])
         self.assertNotIn(b"line 1", " ".join(command).encode())
         self.assertEqual(
             self.client.runner.run.call_args.kwargs["input_data"],
             b"'mds' 'user@example.com' 'remote' 'zimbraDataSourcePassword' "
-            b"'line 1\\n\\'quoted\\'\\\\value'\n",
+            b"'line 1\\n\\'quoted\\'\\\\value'\nexit\n",
         )
 
 
