@@ -549,6 +549,7 @@ class ZimbraCommandTests(unittest.TestCase):
                 client.runner.run([ZMPROV, "ga", "user@example.com"], sensitive=True)
             self.assertNotIn("secret-value", str(caught.exception))
             self.assertIn("output redacted", str(caught.exception))
+            self.assertIn(f"account.{code}", str(caught.exception))
             self.assertEqual(is_missing_object_error(caught.exception), missing)
             self.assertEqual(is_already_exists_error(caught.exception), exists)
 

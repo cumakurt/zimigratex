@@ -110,6 +110,23 @@ class AttributeTests(unittest.TestCase):
         self.assertCountEqual(applied, ["goodA", "goodB"])
         self.assertEqual(warnings[0][0], "unsupported")
 
+    def test_strict_rejection_identifies_attribute_without_its_value(self) -> None:
+        def apply(operations: list[str], _sensitive: bool) -> None:
+            if "zimbraExample" in operations:
+                raise CommandError(
+                    "account.INVALID_ATTR_VALUE; output redacted", attribute_rejection=True
+                )
+
+        with self.assertRaises(CommandError) as caught:
+            apply_attributes_resiliently(
+                {"displayName": ["User"], "zimbraExample": ["secret-value"]},
+                apply,
+                lambda _name, _reason: None,
+                strict=True,
+            )
+        self.assertIn("zimbraExample", str(caught.exception))
+        self.assertNotIn("secret-value", str(caught.exception))
+
     def test_non_attribute_command_failure_is_never_downgraded_to_a_warning(self) -> None:
         def apply(_operations: list[str], _sensitive: bool) -> None:
             raise CommandError("LDAP server unavailable", retryable=True)

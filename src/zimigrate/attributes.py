@@ -178,5 +178,13 @@ def _apply_batch(
             return
         name = items[0][0]
         if strict:
+            if isinstance(exc, CommandError):
+                raise CommandError(
+                    f"Target rejected attribute {name}: {exc}",
+                    returncode=exc.returncode,
+                    retryable=exc.retryable,
+                    attribute_rejection=exc.attribute_rejection,
+                    zimbra_code=exc.zimbra_code,
+                ) from exc
             raise
         warn(name, f"target rejected attribute: {type(exc).__name__}")

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import getpass
 import logging
+import re
 import secrets
 import subprocess  # nosec B404
 import time
@@ -22,6 +23,7 @@ from zimigrate.ssh import SshSession
 
 LOGGER = logging.getLogger(__name__)
 POLL_SECONDS = 0.25
+ZIMBRA_ERROR_CODE = re.compile(r"ERROR:\s+([a-z][a-z0-9_]{0,31}\.[A-Z][A-Z0-9_]{0,95})(?=\s|$)")
 
 
 class CommandRunner:
@@ -162,10 +164,10 @@ class CommandRunner:
             if interrupt.is_set():
                 raise Interrupted("Interrupted by user")
             detail = "output redacted" if sensitive else _safe_error(stderr or stdout)
-            failure = _classify_failure(stderr or stdout)
+            failure = _classify_failure(stderr + "\n" + stdout)
             # Preserve only known error codes so callers can recognize missing or
             # existing objects without retaining sensitive diagnostic values.
-            diagnostic = (stderr or stdout).casefold()
+            diagnostic = (stderr + "\n" + stdout).casefold()
             zimbra_code = next(
                 (
                     marker
@@ -174,6 +176,11 @@ class CommandRunner:
                 ),
                 None,
             )
+            code_match = ZIMBRA_ERROR_CODE.search(stderr + "\n" + stdout)
+            if code_match:
+                zimbra_code = code_match.group(1).casefold()
+                if sensitive:
+                    detail = f"{code_match.group(1)}; output redacted"
             raise CommandError(
                 f"Zimbra command failed with exit code {process.returncode}: {detail}",
                 returncode=process.returncode,
